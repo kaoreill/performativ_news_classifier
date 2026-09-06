@@ -1,15 +1,16 @@
-"""Fetch and extract article content from URLs using jina.ai Reader API."""
+"""Fetch and extract article content from URLs using Mercury Parser API."""
 
 import httpx
 import socket
 import ipaddress
+import os
 from urllib.parse import urlparse
 from typing import Union
 from pydantic import BaseModel
-import re
 
 FETCH_TIMEOUT = 15
-JINA_API = "https://r.jina.ai/"
+PARSER_API = "https://api.mercury.postlight.com/parser"
+PARSER_KEY = os.getenv("MERCURY_API_KEY", "")
 
 
 class Article(BaseModel):
@@ -54,34 +55,31 @@ async def fetch_and_extract(url: str) -> Union[Article, FetchError]:
 
     try:
         async with httpx.AsyncClient(timeout=FETCH_TIMEOUT) as client:
-            resp = await client.get(JINA_API + url)
+            params = {"url": url}
+            if PARSER_KEY:
+                params["api_key"] = PARSER_KEY
+            resp = await client.get(PARSER_API, params=params)
 
             if resp.status_code >= 400:
                 return FetchError(error="http_error", detail=f"HTTP {resp.status_code}")
 
-            markdown = resp.text.strip()
-            if not markdown or len(markdown) < 50:
+            data = resp.json()
+            if data.get("error"):
+                return FetchError(error="extraction_failed", detail=data.get("error", "Parse failed"))
+
+            title = data.get("title", "Untitled").strip()
+            text = data.get("content", "").strip()
+
+            if not text or len(text) < 50:
                 return FetchError(error="extraction_failed", detail="Insufficient content")
+
+            return Article(title=title, text=text)
 
     except httpx.TimeoutException:
         return FetchError(error="fetch_failed", detail="Request timeout")
     except httpx.ConnectError:
         return FetchError(error="fetch_failed", detail="Connection failed")
+    except ValueError:
+        return FetchError(error="extraction_failed", detail="Invalid JSON response")
     except Exception as e:
         return FetchError(error="fetch_failed", detail=str(e)[:100])
-
-    try:
-        lines = markdown.split("\n")
-        title = lines[0].lstrip("#").strip() if lines and lines[0].startswith("#") else "Untitled"
-
-        body = "\n".join(lines[1:]) if len(lines) > 1 else markdown
-        body = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", body)
-        text = body.strip()
-
-        if len(text) < 50:
-            return FetchError(error="extraction_failed", detail="Insufficient article text")
-
-        return Article(title=title, text=text)
-
-    except Exception as e:
-        return FetchError(error="extraction_failed", detail=str(e)[:100])
