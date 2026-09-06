@@ -28,7 +28,9 @@ RESPONSE FORMAT (JSON):
 
 async def classify_article(title: str, text: str) -> dict:
     """Classify article using Groq. Returns dict with label, confidence, reasoning, topics."""
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    api_key = os.getenv("GROQ_API_KEY")
+    print(f"DEBUG: API Key set: {bool(api_key)}")
+    client = Groq(api_key=api_key)
 
     user_msg = f"""Classify this article:
 

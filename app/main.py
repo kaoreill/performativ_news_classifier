@@ -43,6 +43,7 @@ async def health() -> HealthResponse:
 async def classify(req: ClassifyRequest) -> ClassificationResponse:
     """Classify a news article by URL."""
     try:
+        print(f"DEBUG: Classifying {req.url}")
         logger.info(f"Classifying: {req.url}")
 
         # Fetch and extract
