@@ -1,6 +1,10 @@
 # Performativ News Classification API
 
-A small, deterministic backend service that classifies financial news articles as **GOOD_NEWS**, **BAD_NEWS**, or **UNRELATED** to Performativ's wealth management platform business.
+Deterministic backend service classifying financial news articles as **GOOD_NEWS**,
+**BAD_NEWS** or **UNRELATED** to Performativ's wealth management platform business.
+
+Why it is built this way — architecture trade-offs, failure philosophy, security decisions and
+what the evaluation actually measured — is in **[DESIGN.md](DESIGN.md)**.
 
 ## Architecture
 
@@ -28,18 +32,17 @@ POST /classify
 JSON response
 ```
 
-**Philosophy**: deterministic ingestion and validation wrapped tightly around a single,
-well-scoped probabilistic step. Stated as one sentence:
+Deterministic ingestion and validation, wrapped tightly around one well-scoped probabilistic step.
 
 > The LLM **proposes** a classification. Deterministic validation **decides** whether that
 > proposal is acceptable as an API result.
 
-Every gate above the probabilistic step can reject a request before a single token is spent;
-every gate below it can reject the model's answer before it reaches the caller.
+Gates above the model reject a request before a token is spent; gates below it reject the
+model's answer before it reaches the caller.
 
 ### The output contract
 
-Whatever the model returns, these hold for any `200` response:
+Whatever the model returns, these hold for any `200`:
 
 | Rule | Enforced in |
 |---|---|
@@ -50,54 +53,38 @@ Whatever the model returns, these hold for any `200` response:
 | `reasoning` is non-empty | `app/classifier.py` `_parse` |
 | total request time ≤ 45s | `app/main.py` `TOTAL_REQUEST_BUDGET` |
 
-A proposal violating the first, fifth or (structurally) any of them is retried once, then
-reported as `classification_failed`. Off-vocabulary topics are dropped rather than failing the
-request, but are logged at `WARNING` so contract violations stay visible.
+A violating proposal is retried once, then reported as `classification_failed`.
+Off-vocabulary topics are dropped rather than failing the request, but logged at `WARNING` so
+contract violations stay visible.
 
 ## Stack
 
-- **Framework**: FastAPI
-- **HTTP**: httpx
-- **Extraction**: regex normalization of fetched HTML, falling back to jina.ai Reader in
-  JSON mode (which reports the origin's HTTP status, so a reader-rendered error page is not
-  mistaken for an article)
-- **LLM**: Groq API (openai/gpt-oss-120b)
-- **Persistence**: SQLite
-- **Deployment**: Render (free tier, native Python)
+- FastAPI · httpx · SQLite · Groq (`openai/gpt-oss-120b`) · Render (free tier, native Python)
+- **Extraction**: regex normalization of fetched HTML, falling back to jina.ai Reader in JSON
+  mode — which reports the origin's HTTP status, so a reader-rendered error page is not
+  mistaken for an article
 
 ## Setup
 
 ```bash
-conda create -n performativ python=3.11 -y
-conda activate performativ
+conda create -n performativ python=3.11 -y && conda activate performativ
 pip install -r requirements.txt
-
 cp .env.example .env      # then add GROQ_API_KEY (required)
+
+uvicorn app.main:app --reload                        # development
+uvicorn app.main:app --host 0.0.0.0 --port $PORT     # production
 ```
 
 A plain virtualenv works identically (`python -m venv .venv`); nothing depends on conda.
-
-`JINA_API_KEY` is optional locally but recommended in deployment — see Known Limitations.
+`JINA_API_KEY` is optional locally, recommended in deployment — see Known Limitations.
 
 ## API Endpoints
 
-### `GET /health`
-Liveness check.
+- **`GET /health`** — liveness. `curl localhost:8000/health` → `{"status": "ok"}`
+- **`GET /latest?limit=N`** — last N classifications. `limit`: 1–100, default 10.
+- **`POST /classify`** — body `{"url": "https://example.com/article"}`; errors return
+  `{"error": "extraction_failed", "detail": "..."}`
 
-```bash
-curl http://localhost:8000/health
-# {"status": "ok"}
-```
-
-### `POST /classify`
-Classify a news article by URL.
-
-**Request:**
-```json
-{"url": "https://example.com/article"}
-```
-
-**Response (success):**
 ```json
 {
   "url": "https://...",
@@ -109,40 +96,23 @@ Classify a news article by URL.
 }
 ```
 
-`confidence` is the model's **own stated** confidence in its classification, clamped to
-`[0, 1]`. It is not a calibrated probability and should not be read as one — treat it as a
-weak ordering signal, not a likelihood.
+- **`confidence`** — the model's *own stated* confidence, clamped to `[0, 1]`. Not calibrated:
+  a weak ordering signal, not a likelihood.
+- **`relevance_topics`** — *canonical Performativ-relevant themes supporting this
+  classification*, not "topics mentioned in the article". An article on consumer-crypto
+  advertising rules genuinely concerns regulation but supports no relevance finding, so it is
+  `UNRELATED` and carries no topics. `UNRELATED` always returns `relevance_topics: []`.
 
-`relevance_topics` are drawn from a **closed vocabulary** (below) and mean *canonical
-Performativ-relevant themes supporting this classification* — not "topics mentioned in the
-article". The distinction matters: an article about consumer-crypto advertising rules
-genuinely concerns regulation, but supports no relevance finding here, so it is `UNRELATED`
-and carries **no** topics. `UNRELATED` always returns an empty array.
-
-The vocabulary: `wealth_management_software`, `portfolio_management_systems`,
-`private_banks_asset_managers`, `regulation`, `compliance_reporting`, `portfolio_analytics`,
-`ai_in_financial_workflows`, `data_integration`, `legacy_modernization`,
-`custodian_connectivity`.
-
-Fixing the vocabulary is what makes the field usable by the consumers the brief names —
-Slack alerts, CRM enrichment, monitoring. Free-form topics returned the same concept as both
-`"Wealth management software"` and `"wealth management"` across two runs, which nothing
-downstream can match on reliably.
-
-**Response (error):**
-```json
-{
-  "error": "extraction_failed",
-  "detail": "Could not extract article text"
-}
+```
+wealth_management_software   portfolio_management_systems   private_banks_asset_managers
+regulation                   compliance_reporting           portfolio_analytics
+ai_in_financial_workflows    data_integration               legacy_modernization
+custodian_connectivity
 ```
 
-### `GET /latest?limit=N`
-Last N classifications. `limit`: 1–100 (default 10).
-
-```bash
-curl "http://localhost:8000/latest?limit=5"
-```
+A fixed vocabulary makes the field usable by the consumers the brief names — Slack alerts, CRM
+enrichment, monitoring. Free-form topics returned the same concept as both `"Wealth management
+software"` and `"wealth management"` across two runs, which nothing downstream can match on.
 
 ## Error Taxonomy
 
@@ -160,59 +130,46 @@ curl "http://localhost:8000/latest?limit=5"
 
 ## Classification Taxonomy
 
-- **GOOD_NEWS**: Materially relevant to Performativ's business AND net positive
-- **BAD_NEWS**: Materially relevant to Performativ's business AND net negative
-- **UNRELATED**: Not materially relevant (regardless of sentiment)
+- **GOOD_NEWS** — materially relevant to Performativ's business AND net positive
+- **BAD_NEWS** — materially relevant AND net negative
+- **UNRELATED** — not materially relevant, regardless of sentiment
 
-**Critical**: relevance is decided first, independently of sentiment. Sentiment is then
-judged by business mechanism — what the development does to demand, competition, cost or
-differentiation for Performativ — and explicitly *not* by the author's tone. See
-**Encoding business impact** for why that distinction was needed and what measuring it
-changed.
+**Relevance is decided first, independently of sentiment.** Sentiment is then judged by
+business mechanism — what the development does to demand, competition, cost or differentiation
+for Performativ — and explicitly *not* by the author's tone. See
+[Encoding business impact](DESIGN.md#encoding-business-impact-and-what-measuring-it-revealed).
 
-### Likely Relevant Themes
-Wealth management software, portfolio management systems, private banks/asset managers/RIAs, regulation (DORA, MiFID II, FiDA), compliance/reporting/portfolio analytics, AI in regulated financial workflows, enterprise data integration, legacy modernization, custodian connectivity.
-
-### Likely Unrelated Themes
-General consumer tech, macro news with no wealth-tech angle, entertainment, local news with no sector bearing.
-
-## Running Locally
-
-```bash
-# Development
-uvicorn app.main:app --reload
-
-# Production
-uvicorn app.main:app --host 0.0.0.0 --port $PORT
-```
+- **Likely relevant**: wealth management software, portfolio management systems, private
+  banks/asset managers/RIAs, regulation (DORA, MiFID II, FiDA), compliance/reporting/portfolio
+  analytics, AI in regulated financial workflows, enterprise data integration, legacy
+  modernization, custodian connectivity.
+- **Likely unrelated**: general consumer tech, macro news with no wealth-tech angle,
+  entertainment, local news with no sector bearing.
 
 ## Evaluation
-
-Two complementary suites.
 
 ```bash
 python test_contract.py   # offline: no network, no model calls, ~1s
 python eval.py            # live: fetches 17 real URLs and calls the model
 ```
 
-`test_contract.py` proves the guarantees in **The output contract** actually hold, using
-stubbed model responses: off-vocabulary topics are discarded, `UNRELATED` returns no topics,
-confidence is clamped, malformed output is retried exactly once and then fails as
-`classification_failed`, an exhausted budget skips the call rather than issuing a doomed one,
-topics survive persistence with commas intact, and the machine-payload gate accepts a
-technical article that quotes JSON while rejecting an actual payload, and a connection to a
-private address is refused whatever DNS reported. 19 tests, all passing. These are the
-claims most worth making executable, since they are the ones the README asserts.
+**`test_contract.py` — 19 tests, all passing.** Makes the output contract executable with
+stubbed model responses: off-vocabulary topics discarded; `UNRELATED` returns no topics;
+confidence clamped; malformed output retried exactly once then failing as
+`classification_failed`; an exhausted budget skipping the call rather than issuing a doomed one;
+topics surviving persistence with commas intact; the machine-payload gate accepting a technical
+article that quotes JSON while rejecting an actual payload; a connection to a private address
+refused whatever DNS reported.
 
-`eval.py` measures classification quality against live articles. Because it depends on the
-open web, a case that starts failing on retrieval is a fact about a publisher rather than a
-regression — the report prints the retrieval path per case so the two can be told apart.
+**`eval.py`** measures classification quality against live articles, run with `JINA_API_KEY` set
+so it exercises production's retrieval path. Because it depends on the open web, a case failing
+on retrieval is a fact about a publisher, not a regression — the report prints the retrieval
+path per case so the two can be told apart.
 
-17 real URLs covering the taxonomy and every failure mode, run with `JINA_API_KEY` set so
-it exercises the same retrieval path as production. Latest run: **14/17 matched
-expectation**, with all five failure modes behaving correctly. Seven of these labels were
-corrected after an explicit business-impact rubric disagreed with them and the disagreement
-turned out to be right; see **Encoding business impact** for the before/after.
+Last full run: **14/17 matched expectation**, all five failure modes behaving correctly. An
+earlier run scored 17/17; that figure was replaced rather than kept, because re-running did not
+reproduce it (see
+[Residual instability](DESIGN.md#residual-instability-is-reported-not-hidden)).
 
 | Category | Cases | Matched |
 |---|---|---|
@@ -222,82 +179,51 @@ turned out to be right; see **Encoding business impact** for the before/after.
 | Index page (not an article) | 1 | 0 |
 | Failure modes | 5 | 5 |
 
-An earlier run of this same set scored 17/17. That figure has been replaced rather than
-kept, because re-running the suite did not reproduce it. Two of the three divergences are
-the regulation cases already known to be unstable; the third is a publisher change rather
-than a classification.
+The three divergences:
 
-**Cases 4 and 5 returned `BAD_NEWS` against a `GOOD_NEWS` expectation.** Re-running case 4
-produced a genuine coin flip, and the two readings cite opposite mechanisms from the same
-rubric:
+- **Cases 4 and 5** (regulatory demand drivers) returned `BAD_NEWS` against `GOOD_NEWS`. Both are
+  close calls the rubric genuinely does not resolve — see
+  [Residual instability](DESIGN.md#residual-instability-is-reported-not-hidden).
+- **The index-page case**, then pointed at `reuters.com/technology/`, began returning a stable
+  HTTP 401. That is the origin-status gate working, but it left the case asserting Reuters' bot
+  policy rather than our behaviour, so it was repointed at another retrievable section front.
+  Re-expecting `http_error` would have reintroduced the fragility deliberately removed from the
+  failure-mode cases, which are named for the property they demonstrate, never for a publisher.
+  **The suite has not been re-scored since** — 14/17 excludes the repointed case.
 
-> *"...rising compliance burdens and costs, which likely reduce firms' willingness to spend
-> and could strain budgets, outweighing any modest increase in demand for compliance
-> software."* — `BAD_NEWS`, confidence 0.68
-
-> *"...growing regulatory burdens, which creates demand for compliance and data-management
-> software services Performativ provides."* — `GOOD_NEWS`, confidence 0.85
-
-Both are mechanisms the rubric lists: *reduces customers' willingness or ability to spend on
-relevant software*, and *increases demand for wealth-management software, compliance,
-reporting*. The article evidences both, and the rubric does not say which dominates when a
-regulatory burden falls on the customer and creates demand at the same time. The expectation
-is left at `GOOD_NEWS` rather than retuned — changing it to match the run would be
-recording the sampler's mood as a finding.
-
-**Case 12 (`reuters.com/technology/`) now fails retrieval with a stable HTTP 401**, across
-three attempts, where it previously returned navigation text through the reader. That is the
-origin-status gate working: the source's status is surfaced instead of a reader-rendered
-error page passing as an article. The expectation has deliberately *not* been changed to
-`http_error`. Asserting a publisher's anti-bot posture is the exact fragility removed from
-this suite earlier, and re-adding it would make the case test Reuters rather than this
-service.
-
-Failure-mode cases are named for the property they demonstrate, not for a publisher. An
-earlier case asserted that Reuters "hard-blocks automated clients"; with an authenticated
-reader it now retrieves, and Investopedia serves a direct fetch again too. Asserting another
-company's anti-bot posture made the suite fragile and tested nothing about this service, so
-those assertions were removed.
-
-Two of the unrelated cases are deliberate relevance traps — general consumer AI and
-general macro business news. Both are subjects that a keyword-driven classifier would
-pull in, and both were correctly rejected as immaterial.
+Two of the unrelated cases are deliberate relevance traps — general consumer AI, general macro
+business news. Both would be pulled in by a keyword-driven classifier; both were correctly
+rejected as immaterial.
 
 ## Known Limitations
 
-1. **Retrieval success is not the same as usable article text.** Three things need
-   separating, and an earlier version of this README ran them together:
+1. **Retrieval success ≠ usable article text.** Three things need separating, which an earlier
+   version of this README ran together:
 
    ```
    unauthenticated retrieval  ≠  authenticated retrieval  ≠  usable article content
    ```
 
-   Some publishers refuse an unauthenticated direct fetch (Reuters and Investopedia both
-   returned 401/402 at one point, from residential and datacenter IPs alike). With
-   `JINA_API_KEY` set, the reader fallback often retrieves those same URLs — but an
-   HTTP 200 does not imply an article was obtained. `reuters.com/technology/` returns 200
-   and yields mostly navigation, which the classifier then correctly reports as
-   `UNRELATED`.
-
-   Anti-bot posture is the publisher's to change at any time: both of the publishers named
-   above served a direct fetch when this was last measured. Behaviour therefore depends on
-   whether `JINA_API_KEY` is set, and no test in this repo asserts that a particular
-   publisher blocks us.
-2. **The reader fallback is rate-limited when unauthenticated.** Requests are limited
-   per source IP, and a shared PaaS egress IP exhausts that quickly. Set `JINA_API_KEY`
-   in deployment to get a dedicated quota.
-3. **Ephemeral SQLite**: resets on redeploy/restart on Render free tier.
-4. **Confidence is not calibrated**: it is the model's own stated number, returned as the
-   brief's example response specifies, but it should not be read as a probability. It is
-   usable as a weak ordering signal and nothing stronger.
-5. **Topics can come back empty on relevant articles**: the vocabulary is closed, so a
-   genuinely relevant article about an off-list theme returns `relevance_topics: []`. The
-   label and reasoning still carry the finding, and the discarded topic is logged. This is
-   the deliberate cost of a vocabulary downstream consumers can match on.
-6. **No idempotency**: each request is classified independently, even for a repeat URL.
-7. **No auth**: open API, per the case brief.
-8. **Cold starts**: Render free tier sleeps an idle service; the first request can take
-   ~30s — which can exceed the 45s budget on a cold start plus a slow publisher.
+   With `JINA_API_KEY` set, the reader fallback often retrieves URLs that refuse an
+   unauthenticated direct fetch — but HTTP 200 does not imply an article: a section front
+   returns 200 and yields mostly navigation, correctly reported as `UNRELATED`. Behaviour
+   therefore depends on whether `JINA_API_KEY` is set. Anti-bot posture is the publisher's to
+   change at any time, so no test here asserts that a particular publisher blocks us (see
+   [Why retrieval is two-stage](DESIGN.md#why-retrieval-is-two-stage)).
+2. **The reader fallback is rate-limited when unauthenticated** — per source IP, and a shared
+   PaaS egress IP exhausts that quickly. Set `JINA_API_KEY` in deployment for a dedicated quota.
+3. **Ephemeral SQLite** — resets on redeploy/restart on Render's free tier.
+4. **Confidence is not calibrated** — returned because the brief's example response
+   specifies it; a weak ordering signal, nothing stronger.
+5. **Topics can come back empty on relevant articles** — the vocabulary is closed, so a relevant
+   article on an off-list theme returns `[]`. Label and reasoning still carry the finding, and
+   the discarded topic is logged. The deliberate cost of a vocabulary consumers can match on.
+6. **No idempotency** — each request is classified independently, even for a repeat URL.
+7. **No auth** — open API, per the case brief.
+8. **Cold starts** — Render's free tier sleeps an idle service; the first request can take ~30s,
+   which can exceed the 45s budget on a cold start plus a slow publisher.
+9. **Free-tier model quota** — Groq's free tier caps tokens per day, low enough that one full
+   `eval.py` run plus repeat-stability sampling exhausts it. Evaluation runs in batches.
 
 ## File Structure
 
@@ -310,273 +236,15 @@ pull in, and both were correctly rejected as immaterial.
 │   └── db.py            # SQLite persistence
 ├── eval.py              # Evaluation suite (live URLs)
 ├── test_contract.py     # Contract tests (offline, no network or model calls)
-├── requirements.txt
-├── .env.example
-├── .gitignore
-└── README.md
+├── DESIGN.md            # Architecture and evaluation rationale
+└── requirements.txt · .env.example · .gitignore · README.md
 ```
 
 ## Deployment on Render
 
-1. Push to GitHub
-2. Create Web Service on Render, connect repo
-3. Build: `pip install -r requirements.txt`
-4. Start: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-5. Health check path: `/health`
-6. Env: `GROQ_API_KEY=...` (required), `JINA_API_KEY=...` (optional but recommended —
-   without it the reader fallback shares an unauthenticated per-IP rate limit)
+1. Push to GitHub; create a Web Service and connect the repo
+2. Build `pip install -r requirements.txt`; start
+   `uvicorn app.main:app --host 0.0.0.0 --port $PORT`; health check path `/health`
+3. Env: `GROQ_API_KEY` (required), `JINA_API_KEY` (optional but recommended — without it the
+   reader fallback shares an unauthenticated per-IP rate limit)
 
-## Design Notes
-
-Per Performativ's AI philosophy, this is a **governed component**: bounded decisions, clear scope, structured outputs, human-readable reasoning. The LLM only handles classification; deterministic validation and error handling are enforced throughout.
-
-**Reasoning**: capped at 60 words. Short, legible explanations over verbosity.
-
-### Why Option A (classical pipeline) over Option B (LLM with web search)
-
-The brief offers both and asks for a deliberate choice. Retrieval turned out to be the hard
-part of this problem, and Option A is what makes retrieval failures *legible*.
-
-A web-enabled LLM can still encounter publisher authentication, bot protection, or challenge
-pages — those obstacles belong to the publisher, not to any particular architecture. The
-difference is what the service can say afterwards. Because Option A performs retrieval
-explicitly, it can distinguish "the publisher refused us" (`http_error`) from "the page was a
-bot challenge" (`extraction_failed`) from "the model could not classify what we read"
-(`classification_failed`). Fold retrieval into the model call and those collapse into one
-indistinguishable "no useful answer".
-
-That distinction is the entire error taxonomy above, and it is what lets a caller tell a
-problem with their URL apart from a problem with our service.
-
-There is a correctness argument too, not just an observability one. A challenge page returns
-HTTP 200 with plausible-looking text, so it can be mistaken for article content and lead to a
-confident classification of something that was never an article. Owning retrieval is what
-creates the opportunity to detect and reject that case before the model ever sees it.
-
-### Failure philosophy
-
-The service never guesses. When it cannot produce a grounded answer it says so, with a code
-naming the stage that failed:
-
-```
-no answer  →  explicit, structured failure          (what this service does)
-no answer  →  plausible-looking guess               (what it deliberately avoids)
-```
-
-Concretely, there is **no rules-based fallback classifier** for when the LLM is unavailable.
-Adding one is tempting — it superficially satisfies the brief's "deterministic fallbacks"
-bonus. But a keyword-derived `GOOD_NEWS` firing into a Slack alert during a provider outage is
-worse governance than a visible `llm_unavailable`: it is indistinguishable from a real
-classification precisely when it is least trustworthy. A bounded component that reports its
-own unavailability is more useful than one that degrades silently.
-
-The deterministic work happens *before* the model call, where it can prevent bad input rather
-than fabricate output: SSRF, scheme and peer-address checks, per-hop redirect validation, the
-content-type gate, the 5MB cap, bot-challenge detection, and the minimum-text threshold.
-
-### Why the URL is validated twice
-
-The service fetches whatever URL a caller sends it, so the SSRF checks are the one place a
-bug is not merely a wrong label. Two gaps were found by testing the guard rather than
-reading it, and both came from the same mistake: validating a *prediction* of the request
-instead of the request.
-
-**The pre-flight check is not binding on the connection.** `validate_url` resolves the
-hostname and rejects private addresses. The HTTP client then resolves it *again* when it
-connects. Those are two lookups, so a DNS server the attacker controls can answer them
-differently — a public address for the check, a loopback address for the connection.
-The fix is to read the peer address back off the open socket and check the connection that
-was actually made. Demonstrated with a real listener on loopback reached through a public
-hostname that resolves to `127.0.0.1`: the connection succeeds, and the peer check is what
-refuses it.
-
-**Automatic redirect following validated the first URL and nothing after it.** An allowed
-page could hand the request to `169.254.169.254` with a `Location` header. Redirects are
-now followed by hand, each hop re-validated, and the chain capped at 5.
-
-Neither gap was reachable through the eval set, which is the point worth recording: both
-were found by pointing the fetcher at a deliberately hostile target, and both are now
-regression-tested. The layers are deliberately redundant, and their messages distinguish
-which one fired — `Target resolves to...` is the pre-flight, `Connection resolved to...`
-is the socket. The peer check fails *open* when the transport reports no address, since
-that returns the guarantee to the pre-flight check rather than taking the service down on a
-library change.
-
-### Why the request budget is shared, not per-stage
-
-Timeouts compose badly when each stage owns an independent one. The original pipeline could
-spend 15s on a direct fetch, 25s on the fallback, then two LLM attempts at the SDK's default
-60s read timeout — about 160s worst case, long after any caller had given up.
-
-Stage timeouts are now *tuning*; the 45s `TOTAL_REQUEST_BUDGET` is the *contract*. Retrieval
-receives a budget both of its stages draw from, so a slow direct fetch leaves the fallback
-correspondingly less time. Classification receives whatever retrieval left, and its retry
-receives whatever the first attempt left — if too little remains for a call to plausibly
-return, it is skipped rather than issued and cancelled. An `asyncio.wait_for` around the whole
-pipeline, persistence included, is the outer guarantee.
-
-In practice a stage timeout fires first: a hanging fetch returns `fetch_failed` at ~10s rather
-than `request_timeout` at 45s. The global budget is the backstop for anything that slips past
-them, and is covered by a contract test for that reason.
-
-### Why retrieval is two-stage
-
-The first working version fetched pages directly and failed on a large fraction of real
-news URLs. Diagnosis showed three distinct causes that had been collapsed into one
-symptom:
-
-- publishers that refused a direct fetch outright at the time of measurement, from
-  residential and datacenter IPs alike (Reuters and Investopedia then returned 401/402;
-  both have since served a direct fetch, which is the point — this is not a stable
-  property);
-- publishers that block a direct fetch but are readable through a reader service
-  (Wikipedia, Finextra);
-- publishers that return HTTP 200 with a cookie wall or bot challenge instead of the
-  article, which naive extraction happily turns into text.
-
-No single retrieval strategy handles all three, so retrieval tries a direct fetch first
-and falls back to a hosted reader when the direct attempt is blocked, challenged, or
-returns implausibly little text. The third case is why the fallback triggers on thin
-output and not only on HTTP errors: a 200-with-challenge would otherwise be classified
-as though it were an article. Challenge interstitials are detected and rejected as
-`extraction_failed` rather than sent to the model.
-
-Using a hosted extraction service keeps the input contract intact — the endpoint still
-takes an article URL and nothing else. A news search/aggregation API was considered and
-rejected: given a URL it cannot reliably return that article, so it would quietly change
-the contract from "classify this article" to "classify something like it".
-
-### Encoding business impact (and what measuring it revealed)
-
-The taxonomy gave relevance a full paragraph of guidance and gave sentiment none: "net
-positive" was never defined, so the model filled the gap with the only signal available —
-the author's tone. Promotional pieces read positive, cost-anxious pieces read negative, and
-the same underlying development landed on opposite labels depending on who wrote it up.
-
-The prompt now works through explicit steps: establish relevance, state the *underlying
-development* separately from how it is presented, enumerate positive and negative mechanisms
-by which it could affect Performativ, then decide which dominates. Tone is excluded
-explicitly — factual claims in an article are evidence, tone is not.
-
-Measuring the change mattered more than the change itself:
-
-| | Score against the labels of the time |
-|---|---|
-| Baseline prompt (tone as implicit proxy) | 16/17 |
-| Business-impact rubric, original labels | **12/17** |
-| Rubric + tie-break rules, corrected labels | 17/17 (not reproducible) |
-
-The bottom row is a record of one run, not a reproducible score: a later run of the same
-set returned 14/17. The middle row is the useful one. Introducing the rubric moved five cases, and inspecting
-them showed the *labels* were wrong, not the classifier:
-
-- **Four regulation/compliance cases** were labelled `BAD_NEWS` on the unstated assumption
-  that regulatory burden on customers is bad for Performativ. But Performativ sells
-  compliance and reporting tooling, so that burden is a demand driver. The project brief
-  warns against exactly this assumption: *"An article about new financial regulation is not
-  automatically bad."* Corrected to `GOOD_NEWS`.
-- **Three competitor cases** were labelled `GOOD_NEWS` because wealth-tech activity sounds
-  good for wealth tech. A rival launching a product or raising $65M strengthens a competitor;
-  category validation is real but diffuse, a better-funded rival is concrete. Corrected to
-  `BAD_NEWS`.
-
-The rubric also *exposed* an ambiguity rather than creating one. Competitor news oscillated
-run-to-run, because two mechanisms both applied — "increases investment in Performativ's
-target markets" and "strengthens a competing provider" — and nothing said which wins. That
-instability was always latent; the old prompt merely hid it, resolving such stories as
-positive because launch announcements read upbeat. Both cases now have a stated tie-break
-rule.
-
-#### Residual instability is reported, not hidden
-
-Labels are sampled at temperature 0.3, so they are not deterministic. Five runs per case:
-
-| Case | Outcome | Confidence |
-|---|---|---|
-| Competitor launch (WealthAi) | BAD ×5 | 0.70 – 0.80 |
-| Competitor funding (Wealth.com) | BAD ×5 | 0.70 – 0.93 |
-| Compliance costs (ncontracts) | GOOD ×5 | 0.80 |
-| Compliance spend (fourthline) | GOOD ×5 | 0.78 – 0.80 |
-| Advisor-transition tooling (Dispatch) | BAD ×4, GOOD ×1 | 0.70 – 0.90 |
-| Hidden compliance costs (fefundinfo) | GOOD ×4, BAD ×1 | 0.65 – 0.85 |
-| Tighter SEC regulation (rsmus) | GOOD ×4, BAD ×1 | 0.65 – 0.80 |
-
-The unstable cases carry the lowest confidences in the set, which is the intended
-behaviour: where the rubric genuinely does not resolve a case, the classifier is meant to
-pick a side *and* signal that it is close.
-
-Re-measured later, case 4 (fefundinfo) no longer looks like a 4:1 lean. Four clean runs
-split **2 `GOOD_NEWS` / 2 `BAD_NEWS`**, the negative readings at confidence 0.68 and the
-positive ones at 0.80–0.85. Case 5 (rsmus) returned `BAD_NEWS` in the eval run and
-`GOOD_NEWS` at 0.70 on a re-run. That re-measurement was cut short by provider rate
-limiting, so those are 4 and 1 clean samples rather than 5 each — small, and reported as
-such rather than rounded into a rate.
-
-The direction of the finding is the part worth keeping: **more measurement made the result
-worse, not better.** 17/17 came from a favourable run of a set whose regulation cluster is
-genuinely bistable. 14/17 is the honest current number, and the spread across runs is
-roughly 14–17 rather than a point estimate. Neither figure is a claim of general
-accuracy; the brief asks for reasoning quality, and a suite that reports its own variance is
-better evidence of that than one tuned until it scores full marks.
-
-### Why there is no article-vs-index detector
-
-Production testing found the service classifying a section front (`reuters.com/technology/`)
-from its navigation text. The obvious fix is a gate that rejects anything that is not an
-article. Two candidate signals were measured across real articles and real index pages:
-
-| Signal | Articles | Index pages | Separates? |
-|---|---|---|---|
-| Sentences per 1k chars | 2.8 – 4.9 | 0.4 – 2.6 | No — BBC Sport 2.6 vs fintech.global 2.8 |
-| Anchor tags per 1k chars | 22.5 – 54.1 | 23.6 – 54.0 | No — ranges overlap entirely |
-
-Neither separates the two classes. A threshold placed anywhere in those overlapping ranges
-would reject real articles, and rejecting a real article is a worse outcome than processing
-an index page.
-
-So the system does not currently attempt to reliably distinguish article pages from
-section/index pages; such pages are processed when meaningful text is available. This is a
-known limitation rather than a solved problem — a section page could in principle carry
-enough relevant content to merit classification, and equally a nav-only page produces a
-judgement made on weak input.
-
-Recording the negative result is the honest option. Adding progressively more arbitrary
-thresholds until something appeared to work would have produced a detector that looked
-principled and was not.
-
-### Why machine data is rejected by shape, not by header
-
-The direct path rejects non-HTML resources from the `Content-Type` response header. The
-reader path cannot: it normalizes every source into text and does not report the origin's
-content type, so a JSON API response arrives looking like prose. This was a real defect —
-a slow JSON endpoint was retrieved by the fallback, classified, and returned `UNRELATED`
-with confidence 1.0 on reasoning that described "a technical HTTP request dump".
-
-Where deterministic metadata exists it is used first: the reader is queried in JSON mode,
-which returns the *origin's* HTTP status, so a reader-rendered 404 is reported as
-`http_error` instead of passing as a successful retrieval. Content shape is the backstop for
-what the metadata does not cover.
-
-Machine-generated payloads exhibited a distinct structural signature in our test cases —
-JSON key/value pairs and a high share of structural punctuation — which is used only as a
-conservative backstop, not as a general claim that prose and data are always separable. Both
-signals must fire together. Either alone would misfire on exactly the articles this service
-exists to find: enterprise data integration, legacy modernization and custodian connectivity
-pieces routinely quote JSON and config. A contract test pins that case, asserting that an
-article quoting a holdings payload trips the key/value signal, does *not* trip the structural
-one, and is therefore accepted.
-
-`unsupported_content_type` accordingly means **the retrieved payload cannot be treated as an
-HTML article** — determined from HTTP metadata on the direct path, and from payload shape on
-the reader path. The reader path infers where the direct path observes; the taxonomy is kept
-to one error rather than two because the caller's remedy is identical either way.
-
-### Why the classifier forces JSON mode
-
-`gpt-oss` is a reasoning model, and its reasoning tokens are charged against
-`max_tokens`. With a budget sized only for the answer, reasoning consumed the entire
-allowance and the model returned an empty generation, which JSON mode then rejected —
-surfacing as an opaque provider 400. The budget is now well above the answer size with
-reasoning effort held low. Output is parsed and validated in one place, malformed output
-is retried exactly once, and a provider-side JSON validation failure is treated as a bad
-generation to retry rather than an outage.

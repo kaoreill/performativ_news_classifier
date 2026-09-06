@@ -112,10 +112,19 @@ EVAL_CASES = [
     {
         # A section front, not an article. The service does not attempt to tell
         # index pages from articles (see README: no reliable signal was found),
-        # so it processes them when meaningful text is available. Retrieval here
-        # goes through the reader and yields mostly navigation.
+        # so it processes them when meaningful text is available, and a page of
+        # navigation supports no relevance finding.
+        #
+        # This pointed at reuters.com/technology/ until that URL began returning
+        # a stable HTTP 401, which made the case assert Reuters' bot policy
+        # rather than our behaviour. Re-expecting `http_error` would have
+        # reintroduced exactly the fragility removed from the failure-mode cases
+        # below, so the case was repointed at another retrievable section front.
+        # A business publisher's technology front is the harder version of the
+        # test: the subject sits nearer the relevance boundary than a sports or
+        # consumer-tech index does.
         "name": "Section front, processed as available text",
-        "url": "https://www.reuters.com/technology/",
+        "url": "https://www.cnbc.com/technology/",
         "expected": "UNRELATED",
         "category": "Index page, not an article",
     },
