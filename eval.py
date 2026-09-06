@@ -94,33 +94,50 @@ EVAL_CASES = [
         "expected": "UNRELATED",
         "category": "On-topic subject, no news content",
     },
-    # ---- Failure modes -------------------------------------------------------
     {
-        "name": "Non-HTML content (PDF)",
+        # A section front, not an article. The service does not attempt to tell
+        # index pages from articles (see README: no reliable signal was found),
+        # so it processes them when meaningful text is available. Retrieval here
+        # goes through the reader and yields mostly navigation.
+        "name": "Section front, processed as available text",
+        "url": "https://www.reuters.com/technology/",
+        "expected": "UNRELATED",
+        "category": "Index page, not an article",
+    },
+    # ---- Failure modes -------------------------------------------------------
+    #
+    # Named for the property each demonstrates rather than for a publisher.
+    # An earlier case asserted that Reuters "hard-blocks automated clients" and
+    # expected `http_error`; with an authenticated reader it now retrieves, and
+    # Investopedia — the other supposed hard-block — now serves the direct fetch
+    # too. Anti-bot posture is the publisher's to change at any time, so no case
+    # asserts it. What is asserted below is our own behaviour.
+    {
+        "name": "Non-HTML resource is rejected (PDF, via response headers)",
         "url": "https://www.occ.gov/publications-and-resources/publications/comptrollers-handbook/files/asset-management/pub-ch-asset-management.pdf",
         "expected": "unsupported_content_type",
         "category": "Failure mode",
     },
     {
-        "name": "Publisher hard-blocks automated clients",
-        "url": "https://www.reuters.com/technology/",
-        "expected": "http_error",
+        "name": "Machine data is rejected, not classified as an article",
+        "url": "https://api.github.com/repos/python/cpython",
+        "expected": "unsupported_content_type",
         "category": "Failure mode",
     },
     {
-        "name": "Malformed URL",
+        "name": "Malformed URL is rejected before any fetch",
         "url": "not-a-url",
         "expected": "invalid_url",
         "category": "Failure mode",
     },
     {
-        "name": "SSRF attempt (cloud metadata endpoint)",
+        "name": "SSRF target is blocked (cloud metadata endpoint)",
         "url": "http://169.254.169.254/latest/meta-data/",
         "expected": "blocked_url",
         "category": "Failure mode",
     },
     {
-        "name": "Unresolvable host",
+        "name": "Unresolvable host fails as a transport error",
         "url": "https://this-domain-definitely-does-not-exist-xyz123.com/article",
         "expected": "fetch_failed",
         "category": "Failure mode",

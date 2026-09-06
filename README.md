@@ -15,7 +15,7 @@ POST /classify
   ↓              (on block / challenge / thin text)
 [DETERMINISTIC]  retrieval stage 2 — reader fallback (jina.ai Reader)
   ↓
-[DETERMINISTIC]  extraction + minimum-text check
+[DETERMINISTIC]  extraction + minimum-text check + machine-payload gate
   ↓
 [PROBABILISTIC]  LLM classification (Groq)
   ↓
@@ -149,7 +149,7 @@ curl "http://localhost:8000/latest?limit=5"
 | `http_error` | 502 | 4xx/5xx from target |
 | `fetch_failed` | 504 | Timeout, DNS, or connection failure |
 | `request_timeout` | 504 | Pipeline as a whole exceeded the 45s budget |
-| `unsupported_content_type` | 415 | Non-HTML content (PDF, image, etc.) |
+| `unsupported_content_type` | 415 | Payload cannot be treated as an HTML article — a PDF or image (from headers), or structured data such as a JSON API response (from payload shape) |
 | `extraction_failed` | 422 | No meaningful article text found (paywall or bot challenge) |
 | `llm_unavailable` | 502 | Classifier provider unreachable, rate-limited, or unconfigured |
 | `classification_failed` | 502 | Model output still unusable after one retry |
@@ -198,15 +198,23 @@ claims most worth making executable, since they are the ones the README asserts.
 open web, a case that starts failing on retrieval is a fact about a publisher rather than a
 regression — the report prints the retrieval path per case so the two can be told apart.
 
-16 real URLs covering the taxonomy and every failure mode. Latest run: **15/16 matched
-expectation**, with all six failure modes classified correctly.
+17 real URLs covering the taxonomy and every failure mode, run with `JINA_API_KEY` set so
+it exercises the same retrieval path as production. Latest run: **16/17 matched
+expectation**, with all five failure modes classified correctly.
 
 | Category | Cases | Matched |
 |---|---|---|
 | Relevant + positive | 3 | 3 |
 | Relevant + negative | 4 | 3 |
 | Unrelated | 4 | 4 |
+| Index page (not an article) | 1 | 1 |
 | Failure modes | 5 | 5 |
+
+Failure-mode cases are named for the property they demonstrate, not for a publisher. An
+earlier case asserted that Reuters "hard-blocks automated clients"; with an authenticated
+reader it now retrieves, and Investopedia serves a direct fetch again too. Asserting another
+company's anti-bot posture made the suite fragile and tested nothing about this service, so
+those assertions were removed.
 
 The single divergence is case 7, a compliance-cost piece published by a compliance
 vendor: it was labelled `GOOD_NEWS` against an expectation of `BAD_NEWS`. Relevance
@@ -221,12 +229,24 @@ pull in, and both were correctly rejected as immaterial.
 
 ## Known Limitations
 
-1. **Some publishers cannot be retrieved at all.** Reuters and Investopedia return
-   401/402 to any non-browser client, from residential and datacenter IPs alike, and
-   the reader fallback is blocked by them too. This is a property of those publishers,
-   not a bug to fix; the service reports it as a structured `http_error` rather than
-   pretending to have read the page. Defeating it would require a headless browser or
-   a commercial scraping proxy, which is out of scope here.
+1. **Retrieval success is not the same as usable article text.** Three things need
+   separating, and an earlier version of this README ran them together:
+
+   ```
+   unauthenticated retrieval  ≠  authenticated retrieval  ≠  usable article content
+   ```
+
+   Some publishers refuse an unauthenticated direct fetch (Reuters and Investopedia both
+   returned 401/402 at one point, from residential and datacenter IPs alike). With
+   `JINA_API_KEY` set, the reader fallback often retrieves those same URLs — but an
+   HTTP 200 does not imply an article was obtained. `reuters.com/technology/` returns 200
+   and yields mostly navigation, which the classifier then correctly reports as
+   `UNRELATED`.
+
+   Anti-bot posture is the publisher's to change at any time: both of the publishers named
+   above served a direct fetch when this was last measured. Behaviour therefore depends on
+   whether `JINA_API_KEY` is set, and no test in this repo asserts that a particular
+   publisher blocks us.
 2. **The reader fallback is rate-limited when unauthenticated.** Requests are limited
    per source IP, and a shared PaaS egress IP exhausts that quickly. Set `JINA_API_KEY`
    in deployment to get a dedicated quota.
@@ -341,7 +361,10 @@ The first working version fetched pages directly and failed on a large fraction 
 news URLs. Diagnosis showed three distinct causes that had been collapsed into one
 symptom:
 
-- publishers that hard-block automated clients from any IP (Reuters, Investopedia);
+- publishers that refused a direct fetch outright at the time of measurement, from
+  residential and datacenter IPs alike (Reuters and Investopedia then returned 401/402;
+  both have since served a direct fetch, which is the point — this is not a stable
+  property);
 - publishers that block a direct fetch but are readable through a reader service
   (Wikipedia, Finextra);
 - publishers that return HTTP 200 with a cookie wall or bot challenge instead of the
@@ -358,6 +381,58 @@ Using a hosted extraction service keeps the input contract intact — the endpoi
 takes an article URL and nothing else. A news search/aggregation API was considered and
 rejected: given a URL it cannot reliably return that article, so it would quietly change
 the contract from "classify this article" to "classify something like it".
+
+### Why there is no article-vs-index detector
+
+Production testing found the service classifying a section front (`reuters.com/technology/`)
+from its navigation text. The obvious fix is a gate that rejects anything that is not an
+article. Two candidate signals were measured across real articles and real index pages:
+
+| Signal | Articles | Index pages | Separates? |
+|---|---|---|---|
+| Sentences per 1k chars | 2.8 – 4.9 | 0.4 – 2.6 | No — BBC Sport 2.6 vs fintech.global 2.8 |
+| Anchor tags per 1k chars | 22.5 – 54.1 | 23.6 – 54.0 | No — ranges overlap entirely |
+
+Neither separates the two classes. A threshold placed anywhere in those overlapping ranges
+would reject real articles, and rejecting a real article is a worse outcome than processing
+an index page.
+
+So the system does not currently attempt to reliably distinguish article pages from
+section/index pages; such pages are processed when meaningful text is available. This is a
+known limitation rather than a solved problem — a section page could in principle carry
+enough relevant content to merit classification, and equally a nav-only page produces a
+judgement made on weak input.
+
+Recording the negative result is the honest option. Adding progressively more arbitrary
+thresholds until something appeared to work would have produced a detector that looked
+principled and was not.
+
+### Why machine data is rejected by shape, not by header
+
+The direct path rejects non-HTML resources from the `Content-Type` response header. The
+reader path cannot: it normalizes every source into text and does not report the origin's
+content type, so a JSON API response arrives looking like prose. This was a real defect —
+a slow JSON endpoint was retrieved by the fallback, classified, and returned `UNRELATED`
+with confidence 1.0 on reasoning that described "a technical HTTP request dump".
+
+Where deterministic metadata exists it is used first: the reader is queried in JSON mode,
+which returns the *origin's* HTTP status, so a reader-rendered 404 is reported as
+`http_error` instead of passing as a successful retrieval. Content shape is the backstop for
+what the metadata does not cover.
+
+Machine-generated payloads exhibited a distinct structural signature in our test cases —
+JSON key/value pairs and a high share of structural punctuation — which is used only as a
+conservative backstop, not as a general claim that prose and data are always separable. Both
+signals must fire together. Either alone would misfire on exactly the articles this service
+exists to find: enterprise data integration, legacy modernization and custodian connectivity
+pieces routinely quote JSON and config. A contract test pins that case, asserting that an
+article quoting a holdings payload trips the key/value signal, does *not* trip the structural
+one, and is therefore accepted.
+
+`unsupported_content_type` accordingly means **the retrieved payload cannot be treated as an
+HTML article** — determined from HTTP metadata on the direct path, and from payload shape on
+the reader path. The reader path infers where the direct path observes; the taxonomy is kept
+to one error rather than two because the caller's remedy is identical either way.
 
 ### Why the classifier forces JSON mode
 

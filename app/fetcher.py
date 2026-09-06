@@ -34,6 +34,12 @@ RETRIEVAL_BUDGET = 30.0
 # Below this there is not enough time left for a stage to plausibly finish, so
 # attempting it would only burn the remainder of the budget.
 MIN_STAGE_SECONDS = 2.0
+
+# Structured-data thresholds for the reader path. Both must be exceeded; see
+# looks_like_machine_payload for why either alone would misfire on articles
+# about data integration or financial infrastructure.
+MACHINE_KV_PAIRS = 5
+MACHINE_STRUCTURAL_SHARE = 0.10
 MAX_RESPONSE_SIZE = 5 * 1024 * 1024  # 5MB: articles are never this big; DoS guard
 
 # Below this, a 200 response is assumed to be a cookie wall or bot challenge
@@ -126,6 +132,30 @@ def is_challenge_page(article: "Article") -> bool:
     return any(marker in probe for marker in CHALLENGE_MARKERS)
 
 
+def looks_like_machine_payload(text: str) -> bool:
+    """True when the retrieved text is structured data rather than prose.
+
+    The direct path rejects non-HTML resources from the `Content-Type` header.
+    The reader path cannot: it normalizes everything to text and does not report
+    the source's content type, so a JSON API response arrives looking like an
+    article. This inspects the payload's shape instead.
+
+    Both signals must fire. Articles about enterprise data integration or
+    regulated-workflow tooling — squarely inside the relevant themes — quote
+    JSON, config and code, and would trip either signal alone. In measurements,
+    article and index pages scored 0 key/value pairs and 3-5% structural
+    punctuation, while a JSON API scored 97 and 13.2%; the thresholds sit far
+    from the article range so this stays a backstop, not a quality judgement.
+    """
+    if not text:
+        return False
+
+    key_value_pairs = len(re.findall(r'"[A-Za-z_][A-Za-z0-9_]*"\s*:', text))
+    structural_share = sum(text.count(c) for c in '{}[]":,') / len(text)
+
+    return key_value_pairs >= MACHINE_KV_PAIRS and structural_share > MACHINE_STRUCTURAL_SHARE
+
+
 def strip_html(html: str) -> str:
     """Reduce an HTML document to its visible text."""
     body_match = re.search(r"<body[^>]*>(.*?)</body>", html, re.IGNORECASE | re.DOTALL)
@@ -208,7 +238,12 @@ async def fetch_via_reader(url: str, timeout: float = FALLBACK_TIMEOUT) -> Union
     unauthenticated requests are rate-limited per source IP, and a shared PaaS
     egress IP hits that limit quickly (this is what produced the 429s on Render).
     """
-    headers = {"Accept": "text/plain"}
+    # JSON mode rather than markdown: it returns the title as a field instead of
+    # requiring us to regex it out of a "Title:" preamble, and it carries the
+    # *source's* HTTP status, which the reader would otherwise hide behind its
+    # own 200. That status is a deterministic gate; without it a reader-rendered
+    # 404 page looks like a successful retrieval.
+    headers = {"Accept": "application/json"}
     api_key = os.getenv("JINA_API_KEY", "").strip()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -222,25 +257,28 @@ async def fetch_via_reader(url: str, timeout: float = FALLBACK_TIMEOUT) -> Union
             if resp.status_code >= 400:
                 return FetchError(error="http_error", detail=f"Reader returned HTTP {resp.status_code}")
 
-            content = resp.text
+            payload = resp.json()
 
     except httpx.TimeoutException:
         return FetchError(error="fetch_failed", detail="Reader service timeout")
+    except ValueError:
+        return FetchError(error="extraction_failed", detail="Reader returned a malformed response")
     except Exception as e:
         return FetchError(error="fetch_failed", detail=str(e)[:100])
 
-    # Reader output is markdown prefixed with "Title:" / "URL Source:" metadata lines.
-    title = "Untitled"
-    title_match = re.search(r"^Title:\s*(.+)$", content, re.MULTILINE)
-    if title_match:
-        title = title_match.group(1).strip()
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        return FetchError(error="extraction_failed", detail="Reader returned no article data")
 
-    body = content
-    marker = re.search(r"^Markdown Content:\s*$", content, re.MULTILINE)
-    if marker:
-        body = content[marker.end():]
+    # The reader answers 200 even when the origin refused; report the origin's
+    # status so a rendered error page is not mistaken for an article.
+    source_status = data.get("httpStatus")
+    if isinstance(source_status, int) and source_status >= 400:
+        return FetchError(error="http_error", detail=f"HTTP {source_status}")
 
-    text = re.sub(r"\s+", " ", body).strip()
+    title = str(data.get("title") or "Untitled").strip() or "Untitled"
+    text = re.sub(r"\s+", " ", str(data.get("content") or "")).strip()
+
     return Article(title=title, text=text[:MAX_TEXT_CHARS], source="reader")
 
 
@@ -265,6 +303,15 @@ async def fetch_and_extract(
     if isinstance(direct, FetchError) and direct.error == "unsupported_content_type":
         return direct
 
+    # Neither retrieval path may hand structured data to the classifier. The
+    # direct path normally catches this from the Content-Type header; this also
+    # covers a server that mislabels JSON as text/html.
+    if isinstance(direct, Article) and looks_like_machine_payload(direct.text):
+        return FetchError(
+            error="unsupported_content_type",
+            detail="Retrieved payload is structured data, not article text",
+        )
+
     def usable(candidate, min_chars: int) -> bool:
         return (
             isinstance(candidate, Article)
@@ -279,6 +326,16 @@ async def fetch_and_extract(
     remaining = budget - (time.monotonic() - started)
     if remaining >= MIN_STAGE_SECONDS:
         fallback = await fetch_via_reader(url, timeout=min(FALLBACK_TIMEOUT, remaining))
+
+        # This is the case the header gate cannot reach: the direct fetch failed
+        # before headers arrived, so the resource's type was never observed, and
+        # the reader renders anything into text.
+        if isinstance(fallback, Article) and looks_like_machine_payload(fallback.text):
+            return FetchError(
+                error="unsupported_content_type",
+                detail="Retrieved payload is structured data, not article text",
+            )
+
         if usable(fallback, MIN_ACCEPTABLE_CHARS):
             return fallback
 

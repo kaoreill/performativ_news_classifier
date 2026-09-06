@@ -18,7 +18,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app import classifier, db
+from app import classifier, db, fetcher
 from app.classifier import _parse, classify_article
 
 
@@ -149,6 +149,90 @@ def test_topics_survive_persistence_including_commas():
             assert row["processed_at"].endswith("Z"), row
         finally:
             db.DB_PATH = original
+
+
+# --------------------------------------------------------------------------
+# Machine-payload gate
+#
+# The risk here is false positives, not false negatives: wrongly rejecting a
+# real article is worse than letting an odd payload through, so the accept
+# cases outnumber the reject case deliberately.
+# --------------------------------------------------------------------------
+
+JSON_PAYLOAD = """{ "args": {}, "data": "", "files": {}, "form": {}, "headers": {
+"Accept": "text/html,application/xhtml+xml", "Host": "httpbin.org",
+"User-Agent": "Mozilla/5.0", "X-Amzn-Trace-Id": "Root=1-abc-def" },
+"origin": "10.0.0.1", "url": "https://httpbin.org/delay/12" }"""
+
+ARTICLE_TEXT = (
+    "WealthAi has launched a platform for independent financial advisers. The system "
+    "unifies meeting notes, CRM records and compliance oversight in one place. During "
+    "beta trials, firms reported that routine client administration time fell by around "
+    "60 percent. The company said the launch follows two years of development with "
+    "advisory firms in the United Kingdom and Ireland."
+)
+
+INDEX_TEXT = (
+    "Skip to content BBC Sport Home Football Cricket Formula 1 Rugby Union Tennis Golf "
+    "Athletics Live scores Fixtures Tables Gossip Latest news Watch highlights More from "
+    "the BBC Weather Sounds iPlayer News Sport Business Innovation Culture Travel Earth"
+)
+
+# An article about data integration that quotes a payload. This is the case the
+# AND condition exists for: it trips the key/value signal on its own.
+TECHNICAL_ARTICLE = (
+    "Custodian connectivity remains one of the harder integration problems in wealth "
+    "management. Most custodians still expose positions over nightly batch files, and "
+    "firms modernising legacy systems must normalise those into a common schema before "
+    "portfolio analytics can run. A typical normalised holding looks like this: "
+    '{ "accountId": "A-1029", "isin": "IE00B4L5Y983", "quantity": 1450, '
+    '"currency": "EUR", "asOf": "2026-09-01" } '
+    "Firms that adopt a shared representation early report materially lower reconciliation "
+    "costs later. The alternative is a bespoke mapping per custodian, which becomes "
+    "expensive to maintain as the number of connected institutions grows over time."
+)
+
+
+def test_machine_payload_is_detected():
+    assert fetcher.looks_like_machine_payload(JSON_PAYLOAD)
+
+
+def test_real_article_is_not_machine_payload():
+    assert not fetcher.looks_like_machine_payload(ARTICLE_TEXT)
+
+
+def test_index_page_is_not_machine_payload():
+    assert not fetcher.looks_like_machine_payload(INDEX_TEXT)
+
+
+def test_technical_article_quoting_json_is_not_machine_payload():
+    """The false-positive guard, and the reason both signals must fire.
+
+    This text trips the key/value threshold on its own; only the structural
+    punctuation share keeps it classified as prose. An OR condition here would
+    reject a legitimate article about data integration -- a theme the brief
+    explicitly lists as relevant.
+    """
+    import re as _re
+
+    kv = len(_re.findall(r'"[A-Za-z_][A-Za-z0-9_]*"\s*:', TECHNICAL_ARTICLE))
+    share = sum(TECHNICAL_ARTICLE.count(c) for c in '{}[]":,') / len(TECHNICAL_ARTICLE)
+
+    assert kv >= fetcher.MACHINE_KV_PAIRS, f"fixture should trip the kv signal, got {kv}"
+    assert share <= fetcher.MACHINE_STRUCTURAL_SHARE, f"structural share {share:.3f}"
+    assert not fetcher.looks_like_machine_payload(TECHNICAL_ARTICLE)
+
+
+def test_empty_text_is_not_machine_payload():
+    assert not fetcher.looks_like_machine_payload("")
+
+
+def test_neither_retrieval_path_accepts_machine_data():
+    """Path parity: the architectural invariant, not a per-URL assertion."""
+    article = fetcher.Article(title="x", text=JSON_PAYLOAD, source="direct")
+    reader = fetcher.Article(title="x", text=JSON_PAYLOAD, source="reader")
+    assert fetcher.looks_like_machine_payload(article.text)
+    assert fetcher.looks_like_machine_payload(reader.text)
 
 
 def test_global_budget_backstop_returns_request_timeout():

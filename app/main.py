@@ -67,6 +67,21 @@ class HealthResponse(BaseModel):
     status: str
 
 
+@app.on_event("startup")
+async def log_capabilities() -> None:
+    """Surface retrieval capability at boot, never the key itself.
+
+    Local and deployed environments took different retrieval paths for a while
+    because the reader key was set in one and not the other, which meant local
+    results did not describe the deployed service. One boolean in the logs makes
+    that mismatch obvious immediately instead of after a deploy.
+    """
+    logger.info(
+        "reader fallback configured: %s",
+        bool(os.getenv("JINA_API_KEY", "").strip()),
+    )
+
+
 @app.get("/health")
 async def health() -> HealthResponse:
     return HealthResponse(status="ok")
