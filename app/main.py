@@ -60,6 +60,7 @@ async def classify(req: ClassifyRequest) -> ClassificationResponse:
             }
             raise HTTPException(status_code=status_map.get(article.error, 400), detail=article.model_dump())
 
+        print(f"DEBUG: Extracted - title={len(article.title)} chars, text={len(article.text)} chars")
         logger.info(f"Extracted article, classifying...")
 
         # Classify
