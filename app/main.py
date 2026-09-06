@@ -1,17 +1,18 @@
 """Performativ News Classification API."""
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
 import asyncio
+import logging
 import os
 import time
-import logging
 from datetime import datetime, timezone
-from dotenv import load_dotenv
 
-from .fetcher import fetch_and_extract, FetchError as FetcherError, RETRIEVAL_BUDGET
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
 from .classifier import classify_article
-from .db import insert_classification, get_latest
+from .db import get_latest, insert_classification
+from .fetcher import RETRIEVAL_BUDGET, FetchError as FetcherError, fetch_and_extract
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

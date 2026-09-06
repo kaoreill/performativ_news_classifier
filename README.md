@@ -11,6 +11,8 @@ POST /classify
   ↓
 [DETERMINISTIC]  retrieval stage 1 — direct fetch (httpx)
   ↓
+[DETERMINISTIC]  peer-address check · per-hop redirect validation
+  ↓
 [DETERMINISTIC]  content-type gate · 5MB cap · bot-challenge detection
   ↓              (on block / challenge / thin text)
 [DETERMINISTIC]  retrieval stage 2 — reader fallback (jina.ai Reader)
@@ -147,7 +149,7 @@ curl "http://localhost:8000/latest?limit=5"
 | Error | HTTP | Meaning |
 |-------|------|---------|
 | `invalid_url` | 422 | URL parse failure |
-| `blocked_url` | 422 | SSRF block (localhost, private IP, non-http/https) |
+| `blocked_url` | 422 | SSRF block — non-http(s) scheme, or a hostname, redirect hop, or established connection landing on a loopback/private/reserved IP |
 | `http_error` | 502 | 4xx/5xx from target |
 | `fetch_failed` | 504 | Timeout, DNS, or connection failure |
 | `request_timeout` | 504 | Pipeline as a whole exceeded the 45s budget |
@@ -198,7 +200,8 @@ stubbed model responses: off-vocabulary topics are discarded, `UNRELATED` return
 confidence is clamped, malformed output is retried exactly once and then fails as
 `classification_failed`, an exhausted budget skips the call rather than issuing a doomed one,
 topics survive persistence with commas intact, and the machine-payload gate accepts a
-technical article that quotes JSON while rejecting an actual payload. 17 tests, all passing. These are the
+technical article that quotes JSON while rejecting an actual payload, and a connection to a
+private address is refused whatever DNS reported. 19 tests, all passing. These are the
 claims most worth making executable, since they are the ones the README asserts.
 
 `eval.py` measures classification quality against live articles. Because it depends on the
@@ -346,8 +349,36 @@ classification precisely when it is least trustworthy. A bounded component that 
 own unavailability is more useful than one that degrades silently.
 
 The deterministic work happens *before* the model call, where it can prevent bad input rather
-than fabricate output: SSRF and scheme checks, the content-type gate, the 5MB cap, bot-challenge
-detection, and the minimum-text threshold.
+than fabricate output: SSRF, scheme and peer-address checks, per-hop redirect validation, the
+content-type gate, the 5MB cap, bot-challenge detection, and the minimum-text threshold.
+
+### Why the URL is validated twice
+
+The service fetches whatever URL a caller sends it, so the SSRF checks are the one place a
+bug is not merely a wrong label. Two gaps were found by testing the guard rather than
+reading it, and both came from the same mistake: validating a *prediction* of the request
+instead of the request.
+
+**The pre-flight check is not binding on the connection.** `validate_url` resolves the
+hostname and rejects private addresses. The HTTP client then resolves it *again* when it
+connects. Those are two lookups, so a DNS server the attacker controls can answer them
+differently — a public address for the check, a loopback address for the connection.
+The fix is to read the peer address back off the open socket and check the connection that
+was actually made. Demonstrated with a real listener on loopback reached through a public
+hostname that resolves to `127.0.0.1`: the connection succeeds, and the peer check is what
+refuses it.
+
+**Automatic redirect following validated the first URL and nothing after it.** An allowed
+page could hand the request to `169.254.169.254` with a `Location` header. Redirects are
+now followed by hand, each hop re-validated, and the chain capped at 5.
+
+Neither gap was reachable through the eval set, which is the point worth recording: both
+were found by pointing the fetcher at a deliberately hostile target, and both are now
+regression-tested. The layers are deliberately redundant, and their messages distinguish
+which one fired — `Target resolves to...` is the pre-flight, `Connection resolved to...`
+is the socket. The peer check fails *open* when the transport reports no address, since
+that returns the guarantee to the pre-flight check rather than taking the service down on a
+library change.
 
 ### Why the request budget is shared, not per-stage
 

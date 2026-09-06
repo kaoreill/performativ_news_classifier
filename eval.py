@@ -10,7 +10,6 @@ Run with:  python eval.py
 """
 
 import asyncio
-from collections import Counter
 
 from dotenv import load_dotenv
 
@@ -192,7 +191,6 @@ async def run_eval() -> None:
     print("Performativ News Classifier - Evaluation Suite")
     print("=" * 78)
 
-    outcomes = Counter()
     rows = []
 
     for i, case in enumerate(EVAL_CASES, 1):
@@ -202,7 +200,6 @@ async def run_eval() -> None:
             observed = {"result": f"CRASH: {type(e).__name__}", "detail": str(e)[:120], "source": "-"}
 
         status = "PASS" if observed["result"] == case["expected"] else "DIFF"
-        outcomes[status] += 1
         rows.append((status, case, observed))
 
         print(f"\n{i:>2}. {case['name']}  [{case['category']}]")
@@ -212,16 +209,19 @@ async def run_eval() -> None:
         if observed["detail"]:
             print(f"    {safe(observed['detail'])[:150]}")
 
-    total = outcomes["PASS"] + outcomes["DIFF"]
-    print("\n" + "=" * 78)
-    print(f"Matched expectation: {outcomes['PASS']}/{total}"
-          f" ({100 * outcomes['PASS'] / total:.0f}%)" if total else "no cases run")
+    matched = sum(1 for status, _, _ in rows if status == "PASS")
+    diverged = [(case, observed) for status, case, observed in rows if status == "DIFF"]
 
-    if outcomes["DIFF"]:
+    print("\n" + "=" * 78)
+    if rows:
+        print(f"Matched expectation: {matched}/{len(rows)} ({100 * matched / len(rows):.0f}%)")
+    else:
+        print("no cases run")
+
+    if diverged:
         print("\nDivergences:")
-        for status, case, observed in rows:
-            if status == "DIFF":
-                print(f"  - {case['name']}: expected {case['expected']}, got {observed['result']}")
+        for case, observed in diverged:
+            print(f"  - {case['name']}: expected {case['expected']}, got {observed['result']}")
 
 
 if __name__ == "__main__":

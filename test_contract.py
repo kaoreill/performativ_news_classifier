@@ -7,16 +7,23 @@ depending on live model output or network access:
   - UNRELATED carries no relevance topics
   - confidence is clamped into [0, 1]
   - malformed model output is retried exactly once, then fails structurally
+  - neither retrieval path hands structured data to the classifier
+  - a connection landing on a private address is refused, whatever DNS said
+  - the total request budget is enforced even when a stage timeout does not fire
   - topics survive persistence round-trip, commas included
 
 Stdlib only, deliberately small. Run with:  python test_contract.py
 """
 
 import asyncio
+import os
+import re
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from fastapi import HTTPException
 
 from app import classifier, db, fetcher
 from app.classifier import _parse, classify_article
@@ -130,6 +137,9 @@ def test_exhausted_budget_skips_the_call(monkeypatched):
     result = asyncio.run(classify_article("T", "body text", budget=0.1))
     assert result.get("error") == "classification_failed", result
     assert fake.calls == 0, "should not call the provider with no budget left"
+    # The provider was never asked, so the detail must not report a bad answer.
+    assert "budget" in result["detail"].lower(), result
+    assert "parseable" not in result["detail"].lower(), result
 
 
 def test_topics_survive_persistence_including_commas():
@@ -213,9 +223,7 @@ def test_technical_article_quoting_json_is_not_machine_payload():
     reject a legitimate article about data integration -- a theme the brief
     explicitly lists as relevant.
     """
-    import re as _re
-
-    kv = len(_re.findall(r'"[A-Za-z_][A-Za-z0-9_]*"\s*:', TECHNICAL_ARTICLE))
+    kv = len(re.findall(r'"[A-Za-z_][A-Za-z0-9_]*"\s*:', TECHNICAL_ARTICLE))
     share = sum(TECHNICAL_ARTICLE.count(c) for c in '{}[]":,') / len(TECHNICAL_ARTICLE)
 
     assert kv >= fetcher.MACHINE_KV_PAIRS, f"fixture should trip the kv signal, got {kv}"
@@ -229,10 +237,58 @@ def test_empty_text_is_not_machine_payload():
 
 def test_neither_retrieval_path_accepts_machine_data():
     """Path parity: the architectural invariant, not a per-URL assertion."""
-    article = fetcher.Article(title="x", text=JSON_PAYLOAD, source="direct")
-    reader = fetcher.Article(title="x", text=JSON_PAYLOAD, source="reader")
-    assert fetcher.looks_like_machine_payload(article.text)
-    assert fetcher.looks_like_machine_payload(reader.text)
+    for source in ("direct", "reader"):
+        candidate = fetcher.Article(title="x", text=JSON_PAYLOAD, source=source)
+        rejected = fetcher.reject_if_machine_payload(candidate)
+        assert rejected is not None, source
+        assert rejected.error == "unsupported_content_type", (source, rejected)
+
+    # A real article is rejected by neither path, and an upstream FetchError is
+    # passed through untouched rather than relabelled.
+    assert fetcher.reject_if_machine_payload(
+        fetcher.Article(title="x", text=ARTICLE_TEXT, source="direct")
+    ) is None
+    assert fetcher.reject_if_machine_payload(
+        fetcher.FetchError(error="http_error", detail="HTTP 404")
+    ) is None
+
+
+class _FakeStream:
+    """Stands in for the transport's network stream, which reports the peer."""
+
+    def __init__(self, server_addr):
+        self._server_addr = server_addr
+
+    def get_extra_info(self, name):
+        return self._server_addr if name == "server_addr" else None
+
+
+class _FakeResponse:
+    def __init__(self, extensions):
+        self.extensions = extensions
+
+
+def test_peer_address_check_blocks_a_private_connection():
+    """DNS rebinding: the pre-flight check and the connection are two lookups.
+
+    A hostname can resolve to a public address for validate_url and a private
+    one for the socket that follows, so the address is checked again on the
+    connection that was actually opened.
+    """
+    for address in [("127.0.0.1", 80), ("169.254.169.254", 80), ("10.0.0.5", 443)]:
+        rejected = fetcher.reject_unsafe_peer(_FakeResponse({"network_stream": _FakeStream(address)}))
+        assert rejected is not None, address
+        assert rejected.error == "blocked_url", (address, rejected)
+
+
+def test_peer_address_check_allows_public_and_fails_open():
+    public = _FakeResponse({"network_stream": _FakeStream(("185.15.59.224", 443))})
+    assert fetcher.reject_unsafe_peer(public) is None
+
+    # With no transport detail available the check contributes nothing and
+    # validate_url remains the guarantee, rather than every request failing.
+    assert fetcher.reject_unsafe_peer(_FakeResponse({})) is None
+    assert fetcher.reject_unsafe_peer(_FakeResponse({"network_stream": _FakeStream(None)})) is None
 
 
 def test_global_budget_backstop_returns_request_timeout():
@@ -242,8 +298,8 @@ def test_global_budget_backstop_returns_request_timeout():
     returns fetch_failed at ~10s). This proves the outer guarantee still holds
     for anything that slips past them.
     """
-    from fastapi import HTTPException
-
+    # Deferred: importing app.main constructs the FastAPI app and calls
+    # load_dotenv(), neither of which the rest of this offline suite needs.
     from app import main
 
     real_pipeline, real_budget = main._run_pipeline, main.TOTAL_REQUEST_BUDGET
@@ -280,7 +336,6 @@ def main() -> int:
         classifier.AsyncGroq = lambda **_kwargs: fake
 
     real_groq = classifier.AsyncGroq
-    import os
     os.environ.setdefault("GROQ_API_KEY", "test-key-not-used")
 
     passed, failed = 0, []

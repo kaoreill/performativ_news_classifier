@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import time
-from typing import Optional
 
 from groq import (
     APIConnectionError,
@@ -118,7 +117,7 @@ Respond with a single JSON object and nothing else:
 }}""".format(topics="\n".join(f"- {t}" for t in RELEVANCE_TOPICS))
 
 
-def _parse(content: str) -> Optional[dict]:
+def _parse(content: str) -> dict | None:
     """Parse a model response into a validated classification, or None if unusable."""
     if not content:
         return None
@@ -205,7 +204,11 @@ async def classify_article(title: str, text: str, budget: float = CLASSIFY_BUDGE
     client = AsyncGroq(api_key=api_key)
     user_msg = f"Classify this article:\n\nTITLE: {title}\n\nTEXT:\n{text[:MAX_INPUT_CHARS]}"
 
-    last_reason = "Model returned no parseable classification"
+    # This default covers the case where no attempt is ever issued. It is
+    # replaced the moment a call goes out, so the reported detail always
+    # describes the last thing that actually happened rather than blaming the
+    # model for an answer it was never asked to give.
+    last_reason = "No budget remained to call the classifier"
 
     # One retry: JSON mode makes malformed output rare, but sampling can still
     # produce an unusable object. Two attempts, then fail loudly.
@@ -216,6 +219,8 @@ async def classify_article(title: str, text: str, budget: float = CLASSIFY_BUDGE
             # it would only guarantee a cancelled request.
             logger.warning("Skipping classifier attempt %d: %.1fs budget left", attempt, remaining)
             break
+
+        last_reason = "Model returned no parseable classification"
 
         try:
             response = await client.with_options(
@@ -249,7 +254,7 @@ async def classify_article(title: str, text: str, budget: float = CLASSIFY_BUDGE
         if parsed:
             return parsed
 
-        logger.warning("Unusable classifier output on attempt %d; retrying" if attempt == 1
-                       else "Unusable classifier output on attempt %d; giving up", attempt)
+        outcome = "retrying" if attempt == 1 else "giving up"
+        logger.warning("Unusable classifier output on attempt %d; %s", attempt, outcome)
 
     return {"error": "classification_failed", "detail": last_reason}
