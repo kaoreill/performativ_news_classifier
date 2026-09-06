@@ -10,3 +10,7 @@ dist/
 build/
 .DS_Store
 .pytest_cache/
+
+# Internal project-context notes, not part of the submission
+claude.md
+CLAUDE.md

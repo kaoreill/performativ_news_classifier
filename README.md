@@ -56,7 +56,9 @@ request, but are logged at `WARNING` so contract violations stay visible.
 
 - **Framework**: FastAPI
 - **HTTP**: httpx
-- **Extraction**: regex normalization of fetched HTML, with a jina.ai Reader fallback
+- **Extraction**: regex normalization of fetched HTML, falling back to jina.ai Reader in
+  JSON mode (which reports the origin's HTTP status, so a reader-rendered error page is not
+  mistaken for an article)
 - **LLM**: Groq API (openai/gpt-oss-120b)
 - **Persistence**: SQLite
 - **Deployment**: Render (free tier, native Python)
@@ -160,7 +162,11 @@ curl "http://localhost:8000/latest?limit=5"
 - **BAD_NEWS**: Materially relevant to Performativ's business AND net negative
 - **UNRELATED**: Not materially relevant (regardless of sentiment)
 
-**Critical**: Relevance is decided first, independently of sentiment.
+**Critical**: relevance is decided first, independently of sentiment. Sentiment is then
+judged by business mechanism — what the development does to demand, competition, cost or
+differentiation for Performativ — and explicitly *not* by the author's tone. See
+**Encoding business impact** for why that distinction was needed and what measuring it
+changed.
 
 ### Likely Relevant Themes
 Wealth management software, portfolio management systems, private banks/asset managers/RIAs, regulation (DORA, MiFID II, FiDA), compliance/reporting/portfolio analytics, AI in regulated financial workflows, enterprise data integration, legacy modernization, custodian connectivity.
@@ -184,14 +190,15 @@ Two complementary suites.
 
 ```bash
 python test_contract.py   # offline: no network, no model calls, ~1s
-python eval.py            # live: fetches 16 real URLs and calls the model
+python eval.py            # live: fetches 17 real URLs and calls the model
 ```
 
 `test_contract.py` proves the guarantees in **The output contract** actually hold, using
 stubbed model responses: off-vocabulary topics are discarded, `UNRELATED` returns no topics,
 confidence is clamped, malformed output is retried exactly once and then fails as
 `classification_failed`, an exhausted budget skips the call rather than issuing a doomed one,
-and topics survive persistence with commas intact. 11 tests, all passing. These are the
+topics survive persistence with commas intact, and the machine-payload gate accepts a
+technical article that quotes JSON while rejecting an actual payload. 17 tests, all passing. These are the
 claims most worth making executable, since they are the ones the README asserts.
 
 `eval.py` measures classification quality against live articles. Because it depends on the
