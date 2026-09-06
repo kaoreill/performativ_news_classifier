@@ -199,13 +199,17 @@ open web, a case that starts failing on retrieval is a fact about a publisher ra
 regression — the report prints the retrieval path per case so the two can be told apart.
 
 17 real URLs covering the taxonomy and every failure mode, run with `JINA_API_KEY` set so
-it exercises the same retrieval path as production. Latest run: **16/17 matched
-expectation**, with all five failure modes classified correctly.
+it exercises the same retrieval path as production. Latest run: **17/17 matched
+expectation**, with all five failure modes classified correctly — though three cases are
+only ~80% stable across repeated runs, so 16/17 is an equally likely result. Seven of these labels were
+corrected after an explicit business-impact rubric disagreed with them and the disagreement
+turned out to be right; see **Encoding business impact** for the before/after and the
+stability caveat.
 
 | Category | Cases | Matched |
 |---|---|---|
-| Relevant + positive | 3 | 3 |
-| Relevant + negative | 4 | 3 |
+| Relevant + positive (regulatory demand drivers) | 4 | 4 |
+| Relevant + negative (competitor gains ground) | 3 | 3 |
 | Unrelated | 4 | 4 |
 | Index page (not an article) | 1 | 1 |
 | Failure modes | 5 | 5 |
@@ -381,6 +385,66 @@ Using a hosted extraction service keeps the input contract intact — the endpoi
 takes an article URL and nothing else. A news search/aggregation API was considered and
 rejected: given a URL it cannot reliably return that article, so it would quietly change
 the contract from "classify this article" to "classify something like it".
+
+### Encoding business impact (and what measuring it revealed)
+
+The taxonomy gave relevance a full paragraph of guidance and gave sentiment none: "net
+positive" was never defined, so the model filled the gap with the only signal available —
+the author's tone. Promotional pieces read positive, cost-anxious pieces read negative, and
+the same underlying development landed on opposite labels depending on who wrote it up.
+
+The prompt now works through explicit steps: establish relevance, state the *underlying
+development* separately from how it is presented, enumerate positive and negative mechanisms
+by which it could affect Performativ, then decide which dominates. Tone is excluded
+explicitly — factual claims in an article are evidence, tone is not.
+
+Measuring the change mattered more than the change itself:
+
+| | Score against the labels of the time |
+|---|---|
+| Baseline prompt (tone as implicit proxy) | 16/17 |
+| Business-impact rubric, original labels | **12/17** |
+| Rubric + tie-break rules, corrected labels | 17/17 |
+
+The middle row is the useful one. Introducing the rubric moved five cases, and inspecting
+them showed the *labels* were wrong, not the classifier:
+
+- **Four regulation/compliance cases** were labelled `BAD_NEWS` on the unstated assumption
+  that regulatory burden on customers is bad for Performativ. But Performativ sells
+  compliance and reporting tooling, so that burden is a demand driver. The project brief
+  warns against exactly this assumption: *"An article about new financial regulation is not
+  automatically bad."* Corrected to `GOOD_NEWS`.
+- **Three competitor cases** were labelled `GOOD_NEWS` because wealth-tech activity sounds
+  good for wealth tech. A rival launching a product or raising $65M strengthens a competitor;
+  category validation is real but diffuse, a better-funded rival is concrete. Corrected to
+  `BAD_NEWS`.
+
+The rubric also *exposed* an ambiguity rather than creating one. Competitor news oscillated
+run-to-run, because two mechanisms both applied — "increases investment in Performativ's
+target markets" and "strengthens a competing provider" — and nothing said which wins. That
+instability was always latent; the old prompt merely hid it, resolving such stories as
+positive because launch announcements read upbeat. Both cases now have a stated tie-break
+rule.
+
+#### Residual instability is reported, not hidden
+
+Labels are sampled at temperature 0.3, so they are not deterministic. Five runs per case:
+
+| Case | Outcome | Confidence |
+|---|---|---|
+| Competitor launch (WealthAi) | BAD ×5 | 0.70 – 0.80 |
+| Competitor funding (Wealth.com) | BAD ×5 | 0.70 – 0.93 |
+| Compliance costs (ncontracts) | GOOD ×5 | 0.80 |
+| Compliance spend (fourthline) | GOOD ×5 | 0.78 – 0.80 |
+| Advisor-transition tooling (Dispatch) | BAD ×4, GOOD ×1 | 0.70 – 0.90 |
+| Hidden compliance costs (fefundinfo) | GOOD ×4, BAD ×1 | 0.65 – 0.85 |
+| Tighter SEC regulation (rsmus) | GOOD ×4, BAD ×1 | 0.65 – 0.80 |
+
+The three unstable cases carry the lowest confidences in the set, which is the intended
+behaviour: where the rubric genuinely does not resolve a case, the classifier is meant to
+pick a side *and* signal that it is close. A repeat eval run may therefore score 16/17
+rather than 17/17. The 100% figure reflects corrected expectations on a 17-case set — it is
+evidence that the labels and the reasoning now agree, not a claim of general accuracy.
 
 ### Why there is no article-vs-index detector
 

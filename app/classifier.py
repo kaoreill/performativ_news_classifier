@@ -73,11 +73,35 @@ Classify articles into exactly one of three labels:
 - BAD_NEWS: Materially relevant to Performativ's business AND net negative
 - UNRELATED: Not materially relevant to Performativ's business (regardless of sentiment)
 
-CRITICAL: Decide RELEVANCE FIRST, independently. Then evaluate sentiment only if relevant.
+Work through these steps in order.
 
+STEP 1 - RELEVANCE. Decide relevance first, independently of any sentiment.
 RELEVANT THEMES: Wealth management software, portfolio management systems, private banks/asset managers/RIAs, regulation (DORA/MiFID II/FiDA), compliance/reporting/portfolio analytics, AI in regulated financial workflows, enterprise data integration, legacy system modernization, custodian connectivity.
-
 NOT RELEVANT: General consumer tech, macro news with no wealth-tech impact, entertainment, local news with no sector bearing.
+If it is not materially relevant, the label is UNRELATED and you are finished.
+
+STEP 2 - UNDERLYING DEVELOPMENT. State what actually changed: the event, decision or trend being reported, separate from how the author presents it.
+
+STEP 3 - EFFECTS ON PERFORMATIV. Consider both directions before deciding.
+Positive mechanisms:
+- increases demand for wealth-management software, compliance, reporting, portfolio analytics or integration capabilities
+- expands adoption of AI in regulated financial workflows
+- increases investment or modernization spending in Performativ's target markets
+- creates a market need that Performativ's capabilities are positioned to address
+Negative mechanisms:
+- materially strengthens a competing platform or provider, including a competitor's product launch, funding round or capability gain
+- reduces customers' willingness or ability to spend on relevant software
+- creates a substantial new cost, constraint or liability for Performativ itself
+- makes a core Performativ capability less valuable or less differentiating
+Sector growth on its own is not positive. Trace the mechanism to Performativ specifically.
+
+STEP 4 - NET ASSESSMENT. Decide which effect is more significant on the evidence in the article. Many developments cut both ways: weigh the effects on Performativ specifically rather than treating relevance itself as positive. If neither effect clearly dominates, still choose a label, but lower your confidence and name the trade-off in your reasoning.
+
+Two developments cut both ways often enough to need a stated rule:
+- A competitor launching a product or raising funding also signals a growing market. Treat it as net negative: a strengthened rival is concrete, while category validation is diffuse. Only call it positive if the article shows the market expanding in a way Performativ is specifically positioned to capture.
+- Regulation that burdens wealth managers also creates demand for the compliance and reporting tooling Performativ sells. Regulation is therefore not automatically negative. Judge it on which effect the article evidences, and lower confidence when both are present.
+
+IMPORTANT: Do not infer positive or negative business impact from the author's tone, sentiment, or promotional framing. Factual claims in the article are evidence; tone is not. Base the classification on the underlying development and its likely effect on Performativ.
 
 Base your judgement only on the article text provided. Do not use outside knowledge to fill gaps, and do not raise confidence to compensate for missing information.
 
