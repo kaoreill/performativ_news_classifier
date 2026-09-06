@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from .fetcher import fetch_and_extract, FetchError as FetcherError
@@ -16,6 +16,20 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 app = FastAPI(title="Performativ News Classifier")
+
+# Where in the pipeline a failure occurred determines the status code, so that
+# callers can distinguish "your URL is bad" from "the target site blocked us"
+# from "our classifier is down".
+ERROR_STATUS = {
+    "invalid_url": 422,
+    "blocked_url": 422,
+    "unsupported_content_type": 415,
+    "extraction_failed": 422,
+    "http_error": 502,
+    "fetch_failed": 504,
+    "llm_unavailable": 502,
+    "classification_failed": 502,
+}
 
 
 class ClassifyRequest(BaseModel):
@@ -43,61 +57,50 @@ async def health() -> HealthResponse:
 async def classify(req: ClassifyRequest) -> ClassificationResponse:
     """Classify a news article by URL."""
     try:
-        print(f"DEBUG: Classifying {req.url}")
-        logger.info(f"Classifying: {req.url}")
+        logger.info("Classifying: %s", req.url)
 
-        # Fetch and extract
+        # Retrieve and parse
         article = await fetch_and_extract(req.url)
         if isinstance(article, FetcherError):
-            logger.warning(f"Fetch error: {article.error}")
-            status_map = {
-                "invalid_url": 422,
-                "blocked_url": 422,
-                "http_error": 502,
-                "fetch_failed": 504,
-                "unsupported_content_type": 415,
-                "extraction_failed": 422,
-            }
-            raise HTTPException(status_code=status_map.get(article.error, 400), detail=article.model_dump())
-
-        print(f"DEBUG: Extracted - title={len(article.title)} chars, text={len(article.text)} chars")
-        logger.info(f"Extracted article, classifying...")
-
-        # Classify
-        result = await classify_article(article.title, article.text)
-
-        if "error" in result:
-            logger.error(f"Classification error: {result}")
+            logger.warning("Retrieval failed (%s): %s", article.error, article.detail)
             raise HTTPException(
-                status_code=502,
-                detail={"error": result.get("error"), "detail": result.get("detail")}
+                status_code=ERROR_STATUS.get(article.error, 400),
+                detail=article.model_dump(),
             )
 
-        # Validate output
-        label = result.get("label", "").upper()
-        if label not in ("GOOD_NEWS", "BAD_NEWS", "UNRELATED"):
-            logger.error(f"Invalid label: {label}")
-            raise HTTPException(status_code=502, detail={"error": "classification_failed", "detail": "Invalid label"})
+        logger.info("Retrieved via %s: %d chars", article.source, len(article.text))
 
-        reasoning = result.get("reasoning", "")[:200].strip() or "No reasoning provided"
-        topics = [t for t in result.get("relevance_topics", []) if isinstance(t, str)]
+        # Classify — the single probabilistic step
+        result = await classify_article(article.title, article.text)
+        if "error" in result:
+            logger.error("Classification failed (%s): %s", result["error"], result.get("detail"))
+            raise HTTPException(
+                status_code=ERROR_STATUS.get(result["error"], 502),
+                detail={"error": result["error"], "detail": result.get("detail", "")},
+            )
 
         response = ClassificationResponse(
             url=req.url,
-            label=label,
-            reasoning=reasoning,
-            relevance_topics=topics,
-            processed_at=datetime.utcnow(),
+            label=result["label"],
+            reasoning=result["reasoning"],
+            relevance_topics=result["relevance_topics"],
+            processed_at=datetime.now(timezone.utc),
         )
 
-        # Persist (keep confidence in DB for future analysis, just don't expose it)
+        # Persist. Confidence is retained for later analysis but deliberately
+        # not exposed in the response — it is not a calibrated probability.
         try:
-            confidence = float(result.get("confidence", 0.5))
-            insert_classification(req.url, label, confidence, reasoning, topics)
+            insert_classification(
+                req.url,
+                result["label"],
+                result["confidence"],
+                result["reasoning"],
+                result["relevance_topics"],
+            )
         except Exception as e:
-            logger.warning(f"Failed to persist: {e}")
+            logger.warning("Failed to persist classification: %s", e)
 
-        logger.info(f"Classification complete: {label}")
+        logger.info("Classified %s as %s", req.url, result["label"])
         return response
     except HTTPException:
         raise

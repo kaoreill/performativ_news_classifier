@@ -1,171 +1,194 @@
-"""Evaluation suite with ~15 real article URLs covering taxonomy and failure modes."""
+"""Evaluation suite: real article URLs covering the taxonomy and each failure mode.
+
+Every URL here was verified to behave as recorded when the set was assembled.
+Live URLs rot, and publishers change their bot policies, so a case that starts
+failing on retrieval is a fact about the web rather than a regression in the
+classifier — the report prints the retrieval path (direct vs reader) for each
+case so the two can be told apart.
+
+Run with:  python eval.py
+"""
 
 import asyncio
-from app.fetcher import fetch_and_extract, Article
+from collections import Counter
+
+from dotenv import load_dotenv
+
 from app.classifier import classify_article
+from app.fetcher import Article, fetch_and_extract
+
+load_dotenv()
 
 
 EVAL_CASES = [
-    # Clearly relevant + positive
+    # ---- Relevant + positive -------------------------------------------------
     {
-        "name": "Portfolio Management Platform Growth",
-        "url": "https://www.fintech-magazine.com/post/top-portfolio-management-software-2024",
-        "expected": "GOOD_NEWS",
-        "category": "Portfolio management (positive)",
-    },
-    # Clearly relevant + negative
-    {
-        "name": "New Compliance Regulation",
-        "url": "https://www.reuters.com/business/finance/",
-        "expected": "BAD_NEWS",
-        "category": "Regulation (negative)",
-    },
-    # Clearly unrelated: consumer AI
-    {
-        "name": "ChatGPT API Updates",
-        "url": "https://openai.com/blog/",
-        "expected": "UNRELATED",
-        "category": "Consumer AI",
-    },
-    # Clearly unrelated: general macro news
-    {
-        "name": "Stock Market Report",
-        "url": "https://www.cnbc.com/id/100003114/",
-        "expected": "UNRELATED",
-        "category": "Macro market news",
-    },
-    # Clearly unrelated: sports
-    {
-        "name": "Sports News",
-        "url": "https://www.espn.com/",
-        "expected": "UNRELATED",
-        "category": "Sports",
-    },
-    # Regulation example
-    {
-        "name": "MiFID II Compliance Guide",
-        "url": "https://www.investopedia.com/terms/m/mifid.asp",
-        "expected": "BAD_NEWS",
-        "category": "Regulation (MiFID II)",
-    },
-    # AI in financial workflows
-    {
-        "name": "AI-Powered Portfolio Optimization",
-        "url": "https://www.insideinvestor.com/",
+        "name": "WealthAi launches adviser platform",
+        "url": "https://fintech.global/2026/09/03/wealthai-launches-ai-platform-for-independent-advisers/",
         "expected": "GOOD_NEWS",
         "category": "AI in wealth management",
     },
-    # Enterprise data integration
     {
-        "name": "Legacy System Modernization",
-        "url": "https://www.bankingtech.com/",
+        "name": "Dispatch launches advisor transitions software",
+        "url": "https://fintech.global/2026/05/29/dispatch-launches-advisor-transitions-software-for-wealth-firms/",
         "expected": "GOOD_NEWS",
-        "category": "Enterprise integration",
+        "category": "Wealth management software",
     },
-    # Failure mode: paywalled/unextractable
     {
-        "name": "Financial Times Article (Paywalled)",
-        "url": "https://www.ft.com/",
-        "expected": "extraction_failed",
-        "category": "Paywalled content",
+        "name": "Wealth.com raises $65M Series B",
+        "url": "https://www.wealth.com/resources/press/wealth-com-raises-65-million-series-b-to-power-ai-future-of-wealth-management/",
+        "expected": "GOOD_NEWS",
+        "category": "Sector investment",
     },
-    # Failure mode: 404
+    # ---- Relevant + negative -------------------------------------------------
     {
-        "name": "Non-existent page",
-        "url": "https://www.example.com/nonexistent-article-12345",
-        "expected": "http_error",
-        "category": "404 error",
+        "name": "Hidden costs of regulatory compliance",
+        "url": "https://www.fefundinfo.com/insights/the-hidden-costs-of-regulatory-compliance-what-every-asset-manager-should-know",
+        "expected": "BAD_NEWS",
+        "category": "Compliance burden",
     },
-    # Failure mode: PDF
     {
-        "name": "PDF Document",
-        "url": "https://www.w3.org/WAI/WCAG21/Techniques/pdf/pdf1.pdf",
+        "name": "Asset managers face tighter SEC regulation",
+        "url": "https://rsmus.com/insights/industries/asset-management/asset-managers-face-tighter-sec-regulation.html",
+        "expected": "BAD_NEWS",
+        "category": "Regulation",
+    },
+    {
+        "name": "Rising cost of compliance for banks",
+        "url": "https://www.ncontracts.com/nsight-blog/cost-of-compliance-and-how-the-best-banks-respond",
+        "expected": "BAD_NEWS",
+        "category": "Compliance burden",
+    },
+    {
+        # Deliberately ambiguous: a compliance-spend piece written by a vendor as
+        # a sales argument. Relevance is unambiguous, sentiment is genuinely
+        # contested, and the classifier reads it as an opportunity. Kept as an
+        # honest hard case rather than tuned away.
+        "name": "Bank compliance spending trends (ambiguous sentiment)",
+        "url": "https://www.fourthline.com/blog/how-much-do-banks-spend-on-compliance",
+        "expected": "BAD_NEWS",
+        "category": "Ambiguous sentiment",
+    },
+    # ---- Unrelated -----------------------------------------------------------
+    {
+        "name": "Sports coverage",
+        "url": "https://www.bbc.com/sport",
+        "expected": "UNRELATED",
+        "category": "Sport",
+    },
+    {
+        "name": "General consumer AI coverage",
+        "url": "https://techcrunch.com/category/artificial-intelligence/",
+        "expected": "UNRELATED",
+        "category": "Consumer AI (relevance trap)",
+    },
+    {
+        "name": "General business/macro coverage",
+        "url": "https://apnews.com/hub/business",
+        "expected": "UNRELATED",
+        "category": "Macro news (relevance trap)",
+    },
+    {
+        "name": "Encyclopedia entry, not a news event",
+        "url": "https://en.wikipedia.org/wiki/Wealth_management",
+        "expected": "UNRELATED",
+        "category": "On-topic subject, no news content",
+    },
+    # ---- Failure modes -------------------------------------------------------
+    {
+        "name": "Non-HTML content (PDF)",
+        "url": "https://www.occ.gov/publications-and-resources/publications/comptrollers-handbook/files/asset-management/pub-ch-asset-management.pdf",
         "expected": "unsupported_content_type",
-        "category": "Non-HTML content",
+        "category": "Failure mode",
     },
-    # Failure mode: SSRF (localhost)
     {
-        "name": "Localhost (SSRF)",
-        "url": "http://localhost:8000",
-        "expected": "blocked_url",
-        "category": "SSRF protection",
+        "name": "Publisher hard-blocks automated clients",
+        "url": "https://www.reuters.com/technology/",
+        "expected": "http_error",
+        "category": "Failure mode",
     },
-    # Failure mode: Private IP
     {
-        "name": "Private IP (SSRF)",
-        "url": "http://192.168.1.1",
-        "expected": "blocked_url",
-        "category": "SSRF protection",
-    },
-    # Failure mode: Invalid URL
-    {
-        "name": "Invalid URL",
+        "name": "Malformed URL",
         "url": "not-a-url",
+        "expected": "invalid_url",
+        "category": "Failure mode",
+    },
+    {
+        "name": "SSRF attempt (cloud metadata endpoint)",
+        "url": "http://169.254.169.254/latest/meta-data/",
         "expected": "blocked_url",
-        "category": "Invalid URL",
+        "category": "Failure mode",
+    },
+    {
+        "name": "Unresolvable host",
+        "url": "https://this-domain-definitely-does-not-exist-xyz123.com/article",
+        "expected": "fetch_failed",
+        "category": "Failure mode",
     },
 ]
 
 
-async def run_eval():
-    """Run evaluation on all test cases."""
-    print("Performativ News Classifier - Evaluation Suite")
-    print("=" * 80)
-    print()
+def safe(text: str) -> str:
+    """Article text carries typographic characters the Windows console cannot encode."""
+    return str(text).encode("ascii", "replace").decode("ascii")
 
-    passed = 0
-    failed = 0
-    errors = 0
+
+async def run_case(case: dict) -> dict:
+    """Run one case, returning the observed outcome and how it was retrieved."""
+    article = await fetch_and_extract(case["url"])
+
+    if not isinstance(article, Article):
+        return {"result": article.error, "detail": article.detail, "source": "-"}
+
+    classification = await classify_article(article.title, article.text)
+    if "error" in classification:
+        return {
+            "result": classification["error"],
+            "detail": classification.get("detail", ""),
+            "source": article.source,
+        }
+
+    return {
+        "result": classification["label"],
+        "detail": classification["reasoning"],
+        "source": article.source,
+    }
+
+
+async def run_eval() -> None:
+    print("Performativ News Classifier - Evaluation Suite")
+    print("=" * 78)
+
+    outcomes = Counter()
+    rows = []
 
     for i, case in enumerate(EVAL_CASES, 1):
-        print(f"{i}. {case['name']}")
-        print(f"   Category: {case['category']}")
-        print(f"   URL: {case['url'][:60]}{'...' if len(case['url']) > 60 else ''}")
-        print(f"   Expected: {case['expected']}")
-
         try:
-            # Fetch and extract
-            article = await fetch_and_extract(case["url"])
+            observed = await run_case(case)
+        except Exception as e:  # a crash is itself an eval result worth showing
+            observed = {"result": f"CRASH: {type(e).__name__}", "detail": str(e)[:120], "source": "-"}
 
-            if isinstance(article, dict) and "error" in article:
-                result = article.get("error")
-                status = "PASS" if result == case["expected"] else "FAIL"
-                print(f"   Result: {result} [{status}]")
-                if status == "PASS":
-                    passed += 1
-                else:
-                    failed += 1
-            else:
-                # Classify
-                if hasattr(article, 'title') and hasattr(article, 'text'):
-                    classification = await classify_article(article.title, article.text)
+        status = "PASS" if observed["result"] == case["expected"] else "DIFF"
+        outcomes[status] += 1
+        rows.append((status, case, observed))
 
-                    if "error" in classification:
-                        result = classification.get("error")
-                        status = "PASS" if result == case["expected"] else "FAIL"
-                        print(f"   Result: {result} [{status}]")
-                    else:
-                        label = classification.get("label", "UNKNOWN")
-                        status = "PASS" if label == case["expected"] else "FAIL"
-                        print(f"   Result: {label} [{status}]")
+        print(f"\n{i:>2}. {case['name']}  [{case['category']}]")
+        print(f"    {case['url'][:70]}")
+        print(f"    expected={case['expected']:<26} got={observed['result']:<26} [{status}]")
+        print(f"    retrieved via: {observed['source']}")
+        if observed["detail"]:
+            print(f"    {safe(observed['detail'])[:150]}")
 
-                    if status == "PASS":
-                        passed += 1
-                    else:
-                        failed += 1
-                else:
-                    print(f"   Result: extraction_error [FAIL]")
-                    failed += 1
+    total = outcomes["PASS"] + outcomes["DIFF"]
+    print("\n" + "=" * 78)
+    print(f"Matched expectation: {outcomes['PASS']}/{total}"
+          f" ({100 * outcomes['PASS'] / total:.0f}%)" if total else "no cases run")
 
-        except Exception as e:
-            print(f"   ERROR: {str(e)[:100]}")
-            errors += 1
-
-        print()
-
-    print("=" * 80)
-    print(f"Results: {passed} passed, {failed} failed, {errors} errors")
-    print(f"Success rate: {passed}/{passed+failed} ({100*passed/(passed+failed) if passed+failed > 0 else 0:.0f}%)")
+    if outcomes["DIFF"]:
+        print("\nDivergences:")
+        for status, case, observed in rows:
+            if status == "DIFF":
+                print(f"  - {case['name']}: expected {case['expected']}, got {observed['result']}")
 
 
 if __name__ == "__main__":
