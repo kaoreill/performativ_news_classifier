@@ -1,15 +1,15 @@
-"""Fetch and extract article content from URLs."""
+"""Fetch and extract article content from URLs using jina.ai Reader API."""
 
 import httpx
 import socket
 import ipaddress
 from urllib.parse import urlparse
 from typing import Union
-import trafilatura
 from pydantic import BaseModel
+import re
 
-MAX_RESPONSE_SIZE = 5 * 1024 * 1024
 FETCH_TIMEOUT = 15
+JINA_API = "https://r.jina.ai/"
 
 
 class Article(BaseModel):
@@ -31,7 +31,7 @@ def is_private_ip(ip: str) -> bool:
 
 
 async def fetch_and_extract(url: str) -> Union[Article, FetchError]:
-    """Fetch article from URL and extract text."""
+    """Fetch article from URL using jina.ai Reader API."""
     try:
         parsed = urlparse(url)
     except Exception:
@@ -53,26 +53,15 @@ async def fetch_and_extract(url: str) -> Union[Article, FetchError]:
         return FetchError(error="fetch_failed", detail="Network error")
 
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        }
-        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True, headers=headers) as client:
-            resp = await client.get(url)
+        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT) as client:
+            resp = await client.get(JINA_API + url)
 
             if resp.status_code >= 400:
                 return FetchError(error="http_error", detail=f"HTTP {resp.status_code}")
 
-            content_type = resp.headers.get("content-type", "").lower()
-            if not any(ct in content_type for ct in ["text/html", "application/xhtml"]):
-                return FetchError(error="unsupported_content_type", detail=f"Content-Type: {content_type}")
-
-            if len(resp.content) > MAX_RESPONSE_SIZE:
-                return FetchError(error="fetch_failed", detail="Response too large (>5MB)")
+            markdown = resp.text.strip()
+            if not markdown or len(markdown) < 50:
+                return FetchError(error="extraction_failed", detail="Insufficient content")
 
     except httpx.TimeoutException:
         return FetchError(error="fetch_failed", detail="Request timeout")
@@ -82,17 +71,17 @@ async def fetch_and_extract(url: str) -> Union[Article, FetchError]:
         return FetchError(error="fetch_failed", detail=str(e)[:100])
 
     try:
-        extracted = trafilatura.extract(resp.text, include_comments=False, output_format="python")
-        if not extracted:
-            return FetchError(error="extraction_failed", detail="Could not extract article text")
+        lines = markdown.split("\n")
+        title = lines[0].lstrip("#").strip() if lines and lines[0].startswith("#") else "Untitled"
 
-        title = extracted.get("title") or "Untitled"
-        text = extracted.get("raw_text") or extracted.get("text") or ""
+        body = "\n".join(lines[1:]) if len(lines) > 1 else markdown
+        body = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", body)
+        text = body.strip()
 
-        if not text or len(text.strip()) < 50:
+        if len(text) < 50:
             return FetchError(error="extraction_failed", detail="Insufficient article text")
 
         return Article(title=title, text=text)
 
-    except Exception:
-        return FetchError(error="extraction_failed", detail="Extraction failed")
+    except Exception as e:
+        return FetchError(error="extraction_failed", detail=str(e)[:100])
