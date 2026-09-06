@@ -1,16 +1,14 @@
-"""Fetch and extract article content from URLs using Mercury Parser API."""
+"""Fetch and extract article content from URLs."""
 
 import httpx
 import socket
 import ipaddress
-import os
+import re
 from urllib.parse import urlparse
 from typing import Union
 from pydantic import BaseModel
 
 FETCH_TIMEOUT = 15
-PARSER_API = "https://api.mercury.postlight.com/parser"
-PARSER_KEY = os.getenv("MERCURY_API_KEY", "")
 
 
 class Article(BaseModel):
@@ -54,32 +52,41 @@ async def fetch_and_extract(url: str) -> Union[Article, FetchError]:
         return FetchError(error="fetch_failed", detail="Network error")
 
     try:
-        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT) as client:
-            params = {"url": url}
-            if PARSER_KEY:
-                params["api_key"] = PARSER_KEY
-            resp = await client.get(PARSER_API, params=params)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True, headers=headers) as client:
+            resp = await client.get(url)
 
             if resp.status_code >= 400:
                 return FetchError(error="http_error", detail=f"HTTP {resp.status_code}")
 
-            data = resp.json()
-            if data.get("error"):
-                return FetchError(error="extraction_failed", detail=data.get("error", "Parse failed"))
-
-            title = data.get("title", "Untitled").strip()
-            text = data.get("content", "").strip()
-
-            if not text or len(text) < 50:
-                return FetchError(error="extraction_failed", detail="Insufficient content")
-
-            return Article(title=title, text=text)
+            html = resp.text
 
     except httpx.TimeoutException:
         return FetchError(error="fetch_failed", detail="Request timeout")
     except httpx.ConnectError:
         return FetchError(error="fetch_failed", detail="Connection failed")
-    except ValueError:
-        return FetchError(error="extraction_failed", detail="Invalid JSON response")
     except Exception as e:
         return FetchError(error="fetch_failed", detail=str(e)[:100])
+
+    try:
+        title_match = re.search(r"<title[^>]*>([^<]+)</title>", html, re.IGNORECASE)
+        title = title_match.group(1).strip() if title_match else "Untitled"
+
+        og_title = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if og_title:
+            title = og_title.group(1).strip()
+
+        body_match = re.search(r"<body[^>]*>(.*?)</body>", html, re.IGNORECASE | re.DOTALL)
+        body_html = body_match.group(1) if body_match else html
+
+        text = re.sub(r"<[^>]+>", " ", body_html)
+        text = re.sub(r"\s+", " ", text).strip()
+        text = text[:5000]
+
+        if not text or len(text) < 50:
+            return FetchError(error="extraction_failed", detail="Insufficient content")
+
+        return Article(title=title, text=text)
+
+    except Exception as e:
+        return FetchError(error="extraction_failed", detail=str(e)[:100])
