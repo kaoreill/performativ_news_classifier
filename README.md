@@ -209,33 +209,55 @@ open web, a case that starts failing on retrieval is a fact about a publisher ra
 regression — the report prints the retrieval path per case so the two can be told apart.
 
 17 real URLs covering the taxonomy and every failure mode, run with `JINA_API_KEY` set so
-it exercises the same retrieval path as production. Latest run: **17/17 matched
-expectation**, with all five failure modes classified correctly — though three cases are
-only ~80% stable across repeated runs, so 16/17 is an equally likely result. Seven of these labels were
+it exercises the same retrieval path as production. Latest run: **14/17 matched
+expectation**, with all five failure modes behaving correctly. Seven of these labels were
 corrected after an explicit business-impact rubric disagreed with them and the disagreement
-turned out to be right; see **Encoding business impact** for the before/after and the
-stability caveat.
+turned out to be right; see **Encoding business impact** for the before/after.
 
 | Category | Cases | Matched |
 |---|---|---|
-| Relevant + positive (regulatory demand drivers) | 4 | 4 |
+| Relevant + positive (regulatory demand drivers) | 4 | 2 |
 | Relevant + negative (competitor gains ground) | 3 | 3 |
 | Unrelated | 4 | 4 |
-| Index page (not an article) | 1 | 1 |
+| Index page (not an article) | 1 | 0 |
 | Failure modes | 5 | 5 |
+
+An earlier run of this same set scored 17/17. That figure has been replaced rather than
+kept, because re-running the suite did not reproduce it. Two of the three divergences are
+the regulation cases already known to be unstable; the third is a publisher change rather
+than a classification.
+
+**Cases 4 and 5 returned `BAD_NEWS` against a `GOOD_NEWS` expectation.** Re-running case 4
+produced a genuine coin flip, and the two readings cite opposite mechanisms from the same
+rubric:
+
+> *"...rising compliance burdens and costs, which likely reduce firms' willingness to spend
+> and could strain budgets, outweighing any modest increase in demand for compliance
+> software."* — `BAD_NEWS`, confidence 0.68
+
+> *"...growing regulatory burdens, which creates demand for compliance and data-management
+> software services Performativ provides."* — `GOOD_NEWS`, confidence 0.85
+
+Both are mechanisms the rubric lists: *reduces customers' willingness or ability to spend on
+relevant software*, and *increases demand for wealth-management software, compliance,
+reporting*. The article evidences both, and the rubric does not say which dominates when a
+regulatory burden falls on the customer and creates demand at the same time. The expectation
+is left at `GOOD_NEWS` rather than retuned — changing it to match the run would be
+recording the sampler's mood as a finding.
+
+**Case 12 (`reuters.com/technology/`) now fails retrieval with a stable HTTP 401**, across
+three attempts, where it previously returned navigation text through the reader. That is the
+origin-status gate working: the source's status is surfaced instead of a reader-rendered
+error page passing as an article. The expectation has deliberately *not* been changed to
+`http_error`. Asserting a publisher's anti-bot posture is the exact fragility removed from
+this suite earlier, and re-adding it would make the case test Reuters rather than this
+service.
 
 Failure-mode cases are named for the property they demonstrate, not for a publisher. An
 earlier case asserted that Reuters "hard-blocks automated clients"; with an authenticated
 reader it now retrieves, and Investopedia serves a direct fetch again too. Asserting another
 company's anti-bot posture made the suite fragile and tested nothing about this service, so
 those assertions were removed.
-
-The single divergence is case 7, a compliance-cost piece published by a compliance
-vendor: it was labelled `GOOD_NEWS` against an expectation of `BAD_NEWS`. Relevance
-was decided correctly; the sentiment call is genuinely contested, since the article
-frames compliance burden as a market opportunity. It is kept in the set rather than
-tuned away, because it illustrates the boundary the taxonomy does not resolve on its
-own.
 
 Two of the unrelated cases are deliberate relevance traps — general consumer AI and
 general macro business news. Both are subjects that a keyword-driven classifier would
@@ -442,9 +464,10 @@ Measuring the change mattered more than the change itself:
 |---|---|
 | Baseline prompt (tone as implicit proxy) | 16/17 |
 | Business-impact rubric, original labels | **12/17** |
-| Rubric + tie-break rules, corrected labels | 17/17 |
+| Rubric + tie-break rules, corrected labels | 17/17 (not reproducible) |
 
-The middle row is the useful one. Introducing the rubric moved five cases, and inspecting
+The bottom row is a record of one run, not a reproducible score: a later run of the same
+set returned 14/17. The middle row is the useful one. Introducing the rubric moved five cases, and inspecting
 them showed the *labels* were wrong, not the classifier:
 
 - **Four regulation/compliance cases** were labelled `BAD_NEWS` on the unstated assumption
@@ -478,11 +501,23 @@ Labels are sampled at temperature 0.3, so they are not deterministic. Five runs 
 | Hidden compliance costs (fefundinfo) | GOOD ×4, BAD ×1 | 0.65 – 0.85 |
 | Tighter SEC regulation (rsmus) | GOOD ×4, BAD ×1 | 0.65 – 0.80 |
 
-The three unstable cases carry the lowest confidences in the set, which is the intended
+The unstable cases carry the lowest confidences in the set, which is the intended
 behaviour: where the rubric genuinely does not resolve a case, the classifier is meant to
-pick a side *and* signal that it is close. A repeat eval run may therefore score 16/17
-rather than 17/17. The 100% figure reflects corrected expectations on a 17-case set — it is
-evidence that the labels and the reasoning now agree, not a claim of general accuracy.
+pick a side *and* signal that it is close.
+
+Re-measured later, case 4 (fefundinfo) no longer looks like a 4:1 lean. Four clean runs
+split **2 `GOOD_NEWS` / 2 `BAD_NEWS`**, the negative readings at confidence 0.68 and the
+positive ones at 0.80–0.85. Case 5 (rsmus) returned `BAD_NEWS` in the eval run and
+`GOOD_NEWS` at 0.70 on a re-run. That re-measurement was cut short by provider rate
+limiting, so those are 4 and 1 clean samples rather than 5 each — small, and reported as
+such rather than rounded into a rate.
+
+The direction of the finding is the part worth keeping: **more measurement made the result
+worse, not better.** 17/17 came from a favourable run of a set whose regulation cluster is
+genuinely bistable. 14/17 is the honest current number, and the spread across runs is
+roughly 14–17 rather than a point estimate. Neither figure is a claim of general
+accuracy; the brief asks for reasoning quality, and a suite that reports its own variance is
+better evidence of that than one tuned until it scores full marks.
 
 ### Why there is no article-vs-index detector
 
