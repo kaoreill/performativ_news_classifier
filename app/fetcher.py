@@ -53,7 +53,8 @@ async def fetch_and_extract(url: str) -> Union[Article, FetchError]:
         return FetchError(error="fetch_failed", detail="Network error")
 
     try:
-        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True) as client:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT, follow_redirects=True, headers=headers) as client:
             resp = await client.get(url)
 
             if resp.status_code >= 400:
