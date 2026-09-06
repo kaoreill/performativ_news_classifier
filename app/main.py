@@ -79,12 +79,13 @@ async def classify(req: ClassifyRequest) -> ClassificationResponse:
                 detail={"error": result["error"], "detail": result.get("detail", "")},
             )
 
+        processed_at = datetime.now(timezone.utc)
         response = ClassificationResponse(
             url=req.url,
             label=result["label"],
             reasoning=result["reasoning"],
             relevance_topics=result["relevance_topics"],
-            processed_at=datetime.now(timezone.utc),
+            processed_at=processed_at,
         )
 
         # Persist. Confidence is retained for later analysis but deliberately
@@ -96,6 +97,7 @@ async def classify(req: ClassifyRequest) -> ClassificationResponse:
                 result["confidence"],
                 result["reasoning"],
                 result["relevance_topics"],
+                processed_at,
             )
         except Exception as e:
             logger.warning("Failed to persist classification: %s", e)

@@ -1,10 +1,22 @@
 """SQLite persistence layer."""
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path("classifications.db")
+
+
+def to_iso_z(moment: datetime) -> str:
+    """Render a datetime as ISO-8601 UTC with a Z suffix.
+
+    This is how the API serializes `processed_at` on /classify, so storing the
+    same form keeps a single event reading identically from both endpoints.
+    A naive datetime is assumed to be UTC.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def init_db():
@@ -25,15 +37,26 @@ def init_db():
     conn.close()
 
 
-def insert_classification(url: str, label: str, confidence: float, reasoning: str, topics: list[str]) -> None:
-    """Insert classification result."""
+def insert_classification(
+    url: str,
+    label: str,
+    confidence: float,
+    reasoning: str,
+    topics: list[str],
+    processed_at: datetime,
+) -> None:
+    """Insert a classification result.
+
+    `processed_at` is supplied by the caller rather than generated here, so the
+    persisted record carries the same instant the response reported.
+    """
     conn = sqlite3.connect(DB_PATH)
     topics_str = ",".join(topics) if topics else ""
     conn.execute(
         """INSERT INTO classifications
            (url, label, confidence, reasoning, relevance_topics, processed_at)
            VALUES (?, ?, ?, ?, ?, ?)""",
-        (url, label, confidence, reasoning, topics_str, datetime.utcnow().isoformat()),
+        (url, label, confidence, reasoning, topics_str, to_iso_z(processed_at)),
     )
     conn.commit()
     conn.close()
