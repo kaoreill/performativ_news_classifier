@@ -14,6 +14,7 @@ IP). Those surface as a structured `http_error` rather than a silent failure.
 """
 
 import ipaddress
+import time
 import os
 import re
 import socket
@@ -23,8 +24,16 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel
 
-FETCH_TIMEOUT = 15
-FALLBACK_TIMEOUT = 25  # the reader service renders pages, so it is slower
+# Stage timeouts stop any single stage hanging. They are tuning, not the
+# contract: the caller passes a retrieval budget that both stages draw down
+# from, so a slow direct fetch leaves the fallback correspondingly less time.
+FETCH_TIMEOUT = 10
+FALLBACK_TIMEOUT = 20  # the reader service renders pages, so it is slower
+RETRIEVAL_BUDGET = 30.0
+
+# Below this there is not enough time left for a stage to plausibly finish, so
+# attempting it would only burn the remainder of the budget.
+MIN_STAGE_SECONDS = 2.0
 MAX_RESPONSE_SIZE = 5 * 1024 * 1024  # 5MB: articles are never this big; DoS guard
 
 # Below this, a 200 response is assumed to be a cookie wall or bot challenge
@@ -151,11 +160,11 @@ def extract_title(html: str) -> str:
     return "Untitled"
 
 
-async def fetch_direct(url: str) -> Union[Article, FetchError]:
+async def fetch_direct(url: str, timeout: float = FETCH_TIMEOUT) -> Union[Article, FetchError]:
     """Stage 1: fetch the page ourselves, size-capped and content-type checked."""
     try:
         async with httpx.AsyncClient(
-            timeout=FETCH_TIMEOUT, follow_redirects=True, headers=BROWSER_HEADERS
+            timeout=timeout, follow_redirects=True, headers=BROWSER_HEADERS
         ) as client:
             async with client.stream("GET", url) as resp:
                 if resp.status_code >= 400:
@@ -192,7 +201,7 @@ async def fetch_direct(url: str) -> Union[Article, FetchError]:
     return Article(title=extract_title(html), text=strip_html(html)[:MAX_TEXT_CHARS], source="direct")
 
 
-async def fetch_via_reader(url: str) -> Union[Article, FetchError]:
+async def fetch_via_reader(url: str, timeout: float = FALLBACK_TIMEOUT) -> Union[Article, FetchError]:
     """Stage 2: delegate retrieval and parsing to jina.ai Reader.
 
     An API key is optional but strongly recommended in deployment:
@@ -205,7 +214,7 @@ async def fetch_via_reader(url: str) -> Union[Article, FetchError]:
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
-        async with httpx.AsyncClient(timeout=FALLBACK_TIMEOUT, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             resp = await client.get(f"https://r.jina.ai/{url}", headers=headers)
 
             if resp.status_code == 429:
@@ -235,13 +244,22 @@ async def fetch_via_reader(url: str) -> Union[Article, FetchError]:
     return Article(title=title, text=text[:MAX_TEXT_CHARS], source="reader")
 
 
-async def fetch_and_extract(url: str) -> Union[Article, FetchError]:
-    """Retrieve and parse an article, falling back to a reader service when needed."""
+async def fetch_and_extract(
+    url: str, budget: float = RETRIEVAL_BUDGET
+) -> Union[Article, FetchError]:
+    """Retrieve and parse an article, falling back to a reader service when needed.
+
+    `budget` is the total seconds retrieval may consume across both stages. The
+    fallback gets whatever the direct attempt left, so a slow first stage cannot
+    hand the second a full fresh timeout.
+    """
+    started = time.monotonic()
+
     blocked = validate_url(url)
     if blocked:
         return blocked
 
-    direct = await fetch_direct(url)
+    direct = await fetch_direct(url, timeout=min(FETCH_TIMEOUT, max(budget, MIN_STAGE_SECONDS)))
 
     # A PDF or image will not become extractable via the fallback either.
     if isinstance(direct, FetchError) and direct.error == "unsupported_content_type":
@@ -258,9 +276,11 @@ async def fetch_and_extract(url: str) -> Union[Article, FetchError]:
         return direct
 
     # Direct fetch was blocked, errored, challenged, or returned too little text.
-    fallback = await fetch_via_reader(url)
-    if usable(fallback, MIN_ACCEPTABLE_CHARS):
-        return fallback
+    remaining = budget - (time.monotonic() - started)
+    if remaining >= MIN_STAGE_SECONDS:
+        fallback = await fetch_via_reader(url, timeout=min(FALLBACK_TIMEOUT, remaining))
+        if usable(fallback, MIN_ACCEPTABLE_CHARS):
+            return fallback
 
     # Fallback failed too. Prefer thin-but-real direct content over nothing.
     if usable(direct, MIN_ACCEPTABLE_CHARS):

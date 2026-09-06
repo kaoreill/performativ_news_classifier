@@ -1,5 +1,6 @@
 """SQLite persistence layer."""
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,7 +52,9 @@ def insert_classification(
     persisted record carries the same instant the response reported.
     """
     conn = sqlite3.connect(DB_PATH)
-    topics_str = ",".join(topics) if topics else ""
+    # JSON, not a comma-joined string: a topic containing a comma would
+    # otherwise split into two on the way back out.
+    topics_str = json.dumps(topics)
     conn.execute(
         """INSERT INTO classifications
            (url, label, confidence, reasoning, relevance_topics, processed_at)
@@ -77,12 +80,24 @@ def get_latest(limit: int = 10) -> list[dict]:
         {
             "url": r["url"],
             "label": r["label"],
+            "confidence": r["confidence"],
             "reasoning": r["reasoning"],
-            "relevance_topics": r["relevance_topics"].split(",") if r["relevance_topics"] else [],
+            "relevance_topics": _load_topics(r["relevance_topics"]),
             "processed_at": r["processed_at"],
         }
         for r in rows
     ]
+
+
+def _load_topics(stored: str) -> list[str]:
+    """Read a topics column, tolerating rows written before JSON storage."""
+    if not stored:
+        return []
+    try:
+        loaded = json.loads(stored)
+    except (json.JSONDecodeError, TypeError):
+        return [t for t in stored.split(",") if t]
+    return loaded if isinstance(loaded, list) else []
 
 
 # Initialize on import

@@ -11,6 +11,7 @@ provider outage apart from a bad generation.
 import json
 import logging
 import os
+import time
 from typing import Optional
 
 from groq import (
@@ -33,7 +34,37 @@ MAX_TOKENS = 1024
 REASONING_EFFORT = "low"
 MAX_INPUT_CHARS = 2000
 
+# The SDK defaults to a 60s read timeout, so two attempts could alone outlast
+# any sane request budget. Attempts draw down a shared allowance instead.
+CLASSIFY_BUDGET = 15.0
+LLM_ATTEMPT_TIMEOUT = 10.0
+MIN_ATTEMPT_SECONDS = 2.0
+
 VALID_LABELS = ("GOOD_NEWS", "BAD_NEWS", "UNRELATED")
+
+# A closed vocabulary drawn from the brief's own "Likely Relevant" themes.
+#
+# `relevance_topics` means: canonical Performativ-relevant business themes that
+# support this classification. It does NOT mean "topics detected in the
+# article". An article on consumer-crypto advertising rules genuinely concerns
+# regulation, but supports no relevance finding here, so it carries no topics.
+#
+# Free-form topics are unusable downstream: the same concept came back as both
+# "Wealth management software" and "wealth management" across two runs. The
+# brief positions this service behind Slack alerts and CRM enrichment, and those
+# consumers need a value they can match on.
+RELEVANCE_TOPICS = (
+    "wealth_management_software",
+    "portfolio_management_systems",
+    "private_banks_asset_managers",
+    "regulation",
+    "compliance_reporting",
+    "portfolio_analytics",
+    "ai_in_financial_workflows",
+    "data_integration",
+    "legacy_modernization",
+    "custodian_connectivity",
+)
 
 SYSTEM_PROMPT = """You are a news classifier for Performativ, a platform/OS for wealth managers (private banks, family offices, asset managers, RIAs).
 
@@ -50,13 +81,17 @@ NOT RELEVANT: General consumer tech, macro news with no wealth-tech impact, ente
 
 Base your judgement only on the article text provided. Do not use outside knowledge to fill gaps, and do not raise confidence to compensate for missing information.
 
+RELEVANCE TOPICS: choose only from this exact list, and only those that support your
+relevance finding. Use the exact strings. If the label is UNRELATED, return an empty list.
+{topics}
+
 Respond with a single JSON object and nothing else:
-{
+{{
   "label": "GOOD_NEWS" | "BAD_NEWS" | "UNRELATED",
   "confidence": 0.0-1.0,
   "reasoning": "1-2 sentences (40-60 words max). Explain the relevance decision first, then sentiment if relevant.",
-  "relevance_topics": ["topic1", "topic2"]
-}"""
+  "relevance_topics": ["topic_from_the_list"]
+}}""".format(topics="\n".join(f"- {t}" for t in RELEVANCE_TOPICS))
 
 
 def _parse(content: str) -> Optional[dict]:
@@ -94,22 +129,55 @@ def _parse(content: str) -> Optional[dict]:
     except (TypeError, ValueError):
         confidence = 0.5
 
-    topics = [t.strip() for t in data.get("relevance_topics", []) if isinstance(t, str) and t.strip()]
-
     return {
         "label": label,
         "confidence": confidence,
         "reasoning": reasoning,
-        "relevance_topics": topics,
+        "relevance_topics": _clean_topics(data.get("relevance_topics", []), label),
     }
 
 
-async def classify_article(title: str, text: str) -> dict:
-    """Classify an article. Returns a validated result, or a dict with an `error` key."""
+def _clean_topics(raw, label: str) -> list[str]:
+    """Reduce proposed topics to the closed vocabulary.
+
+    Off-vocabulary topics are discarded, but logged first: a silent drop would
+    destroy the evidence that the model broke its contract, which is precisely
+    what we would want to know.
+    """
+    if label == "UNRELATED":
+        # "relevance topics" on an article judged not relevant is a
+        # contradiction under the definition above, whatever the model proposed.
+        return []
+
+    kept, discarded = [], []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, str):
+            continue
+        slug = item.strip().lower().replace("-", "_").replace(" ", "_")
+        if slug in RELEVANCE_TOPICS:
+            if slug not in kept:
+                kept.append(slug)
+        elif item.strip():
+            discarded.append(item.strip())
+
+    if discarded:
+        logger.warning("Discarded off-vocabulary relevance topics: %s", discarded)
+
+    return kept
+
+
+async def classify_article(title: str, text: str, budget: float = CLASSIFY_BUDGET) -> dict:
+    """Classify an article. Returns a validated result, or a dict with an `error` key.
+
+    `budget` is the total seconds classification may consume. Attempts draw it
+    down, so a slow first call leaves the retry correspondingly less time rather
+    than a fresh allowance.
+    """
     api_key = os.getenv("GROQ_API_KEY", "").strip()
     if not api_key:
         return {"error": "llm_unavailable", "detail": "GROQ_API_KEY is not configured"}
 
+    started = time.monotonic()
     client = AsyncGroq(api_key=api_key)
     user_msg = f"Classify this article:\n\nTITLE: {title}\n\nTEXT:\n{text[:MAX_INPUT_CHARS]}"
 
@@ -118,8 +186,17 @@ async def classify_article(title: str, text: str) -> dict:
     # One retry: JSON mode makes malformed output rare, but sampling can still
     # produce an unusable object. Two attempts, then fail loudly.
     for attempt in (1, 2):
+        remaining = budget - (time.monotonic() - started)
+        if remaining < MIN_ATTEMPT_SECONDS:
+            # Not enough budget left for this call to plausibly return; issuing
+            # it would only guarantee a cancelled request.
+            logger.warning("Skipping classifier attempt %d: %.1fs budget left", attempt, remaining)
+            break
+
         try:
-            response = await client.chat.completions.create(
+            response = await client.with_options(
+                timeout=min(LLM_ATTEMPT_TIMEOUT, remaining)
+            ).chat.completions.create(
                 model=MODEL,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
